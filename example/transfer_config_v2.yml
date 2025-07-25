@@ -16,7 +16,7 @@ model_builder_config:
       - northern_flow
       - exports
       - sjr_flow
-      - cu_flow
+      - cu_delta
       - sf_tidal_energy
       - sf_tidal_filter
       - dcc
@@ -114,6 +114,75 @@ steps:
     save_modified_orig_model_fname: schism_base-suisun_gru2  # Keep modified version of SCHISM (Base)
     rnn_type: LSTM         # or GRU
     rnn_units: [32, 16]    # List defines layers: 2 layers with 32 and 16 units respectively
+
+# --------------------------------------------------------------
+- name: base.slr  # Step 3: Transfer SCHISM (Base Scenario) to SCHISM (SLR Scenario)
+  input_prefix: schism_slr_base  # Dataset for the SLR scenario
+  input_mask_regex: None
+  output_prefix: "{output_dir}/schism_base.slr_gru2"  # New model name
+  save_model_fname: "{output_dir}/schism_base.slr_gru2"  # Final model filename
+  load_model_fname: "{output_dir}/dsm2.schism_base_gru2"  # Start from SCHISM (Base)
+  pool_size: 12
+  pool_aggregation: False
+  target_fold_length: 180d
+  init_train_rate: 0.001  # Even lower learning rate for fine-tuning
+  init_epochs: 12 # Short fine-tuning phase
+  main_train_rate: 0.0005  # Main learning rate for adaptation
+  main_epochs: 62  # Extended training for scenario adaptation
+  builder_args:
+    source_data_prefix: schism_base
+    source_input_mask_regex: [schism_base_2021.csv ]
+    transfer_type: contrastive  # Use contrastive learning to retain differences
+    contrast_weight: 0.5
+    save_modified_orig_model_fname: schism_base-slr_gru2  # Keep modified version of SCHISM (Base)
+    rnn_type: LSTM         # or GRU
+    rnn_units: [32, 16]    # List defines layers: 2 layers with 32 and 16 units respectively
+
+# --------------------------------------------------------------
+- name: base.ft  # Step 3: Transfer SCHISM (Base Scenario) to SCHISM (Franks Scenario)
+  input_prefix: schism_franks  # Dataset for the Suisun scenario
+  input_mask_regex: None
+  output_prefix: "{output_dir}/schism_base.ft_gru2"  # New model name
+  save_model_fname: "{output_dir}/schism_base.ft_gru2"  # Final model filename
+  load_model_fname: "{output_dir}/dsm2.schism_base_gru2"  # Start from SCHISM (Base)
+  pool_size: 12
+  pool_aggregation: False
+  target_fold_length: 180d
+  init_train_rate: 0.001  # Even lower learning rate for fine-tuning
+  init_epochs: 12 # Short fine-tuning phase
+  main_train_rate: 0.0005  # Main learning rate for adaptation
+  main_epochs: 62  # Extended training for scenario adaptation
+  builder_args:
+    source_data_prefix: schism_base
+    source_input_mask_regex: [schism_base_2021.csv ]
+    transfer_type: contrastive  # Use contrastive learning to retain differences
+    contrast_weight: 0.5
+    save_modified_orig_model_fname: schism_base-ft_gru2  # Keep modified version of SCHISM (Base)
+    rnn_type: LSTM         # or GRU
+    rnn_units: [32, 16]    # List defines layers: 2 layers with 32 and 16 units respectively
+
+# --------------------------------------------------------------
+- name: base.cache  # Step 3: Transfer SCHISM (Base Scenario) to SCHISM (Cache Scenario)
+  input_prefix: schism_cache  # Dataset for the Suisun scenario
+  input_mask_regex: None
+  output_prefix: "{output_dir}/schism_base.cache_gru2"  # New model name
+  save_model_fname: "{output_dir}/schism_base.cache_gru2"  # Final model filename
+  load_model_fname: "{output_dir}/dsm2.schism_base_gru2"  # Start from SCHISM (Base)
+  pool_size: 12
+  pool_aggregation: False
+  target_fold_length: 180d
+  init_train_rate: 0.001  # Even lower learning rate for fine-tuning
+  init_epochs: 12 # Short fine-tuning phase
+  main_train_rate: 0.0005  # Main learning rate for adaptation
+  main_epochs: 62  # Extended training for scenario adaptation
+  builder_args:
+    source_data_prefix: schism_base
+    source_input_mask_regex: [ schism_base_2021.csv ]
+    transfer_type: contrastive  # Use contrastive learning to retain differences
+    contrast_weight: 0.5
+    save_modified_orig_model_fname: schism_base-cache_gru2  # Keep modified version of SCHISM (Base)
+    rnn_type: LSTM         # or GRU
+    rnn_units: [ 32, 16 ]    # List defines layers: 2 layers with 32 and 16 units respectively
 
 # --------------------------------------------------------------
 - name: dsm2.rma  # Step 2: Transfer DSM2 Knowledge to RMA
