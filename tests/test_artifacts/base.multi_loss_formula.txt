@@ -1,0 +1,7 @@
+Loss function (per-step, compiled):
+  L = λ_base·L_base + Σ_i [ λ_i·L_i + μ_i·L_i^Δ ]
+
+Expanded with configured weights:
+  L_total = λ_base·L_base (λ_base=1.0) + λ_suisun·L_suisun (λ_suisun=1.0) + μ_suisun·L^Δ_suisun (μ_suisun=0.5) + λ_slr·L_slr (λ_slr=1.0) + μ_slr·L^Δ_slr (μ_slr=0.5) + λ_cache·L_cache (λ_cache=1.0) + μ_cache·L^Δ_cache (μ_cache=0.5) + λ_franks·L_franks (λ_franks=1.0) + μ_franks·L^Δ_franks (μ_franks=0.5)
+
+Loss per-output uses: ScaledMaskedMAE

@@ -182,5 +182,5 @@ steps:
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-slr_gru2     
     feature_layers:
-      - {type: GRU, units: 32, name: lay1, trainable: true}
-      - {type: GRU, units: 16, name: lay2, trainable: true}
+      - {type: GRU, units: 32, name: feature1, trainable: true}
+      - {type: GRU, units: 16, name: feature2, trainable: true}

@@ -24,7 +24,7 @@ dependencies:
   - hvplot
   - holoviews
   - panel
-  - pyhecdss
+  # - pyhecdss
   - ipykernel
   - openpyxl==3.1.0
 

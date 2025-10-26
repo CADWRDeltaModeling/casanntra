@@ -18,10 +18,17 @@ from casanntra.xvalid_multi import xvalid_fit_multi, bulk_fit
 from casanntra.read_data import read_data
 from casanntra.single_or_list import single_or_list
 
-model_builders = {
-    "GRUBuilder2": GRUBuilder2,
-    "MultiStageModelBuilder": MultiStageModelBuilder,
-}
+import glob
+
+try:
+    from casanntra.multi_scenario_model_builder import MultiScenarioModelBuilder
+except Exception:
+    MultiScenarioModelBuilder = None
+
+model_builders = {"GRUBuilder2": GRUBuilder2, "MultiStageModelBuilder": MultiStageModelBuilder}
+
+if MultiScenarioModelBuilder is not None:
+    model_builders["MultiScenarioModelBuilder"] = MultiScenarioModelBuilder
 
 
 def fit_from_config(
@@ -123,40 +130,55 @@ def fit_from_config(
     fpattern = f"{input_prefix}_*.csv"
     df = read_data(fpattern, input_mask_regex)
 
-    # ✅ Handle secondary dataset if required
-    if builder.requires_secondary_data():
+    # MULTI-SCENARIO HANDLING
+    if builder.requires_secondary_data() and _is_multi_scenario_step(builder):
+        source_data_prefix = builder.builder_args.get("source_data_prefix", None)
+
+        if source_data_prefix is None:
+            raise ValueError("Multi-scenario step requires 'source_data_prefix'.")
+        source_mask = builder.builder_args.get("source_input_mask_regex", None)
+
+        base_fpattern = f"{source_data_prefix}_*.csv"
+        df_base = read_data(base_fpattern, input_mask_regex=source_mask)
+
+        scenarios_cfg = builder.builder_args.get("scenarios", [])
+        scenario_dfs = []
+        for sc in scenarios_cfg:
+            tgt_fpattern = f"{sc['input_prefix']}_*.csv"
+            tgt_mask = sc.get("input_mask_regex", None)
+            scenario_dfs.append(read_data(tgt_fpattern, input_mask_regex=tgt_mask))
+
+        aligned = builder.pool_and_align_cases([df_base] + scenario_dfs)
+        df_base = aligned[0]
+        scenario_dfs = aligned[1:]
+
+        df_base_in, df_base_out = builder.xvalid_time_folds(df_base, target_fold_length, split_in_out=True)
+        df_in = df_base_in                   
+        df_out_list = [df_base_out]            
+        for dfi in scenario_dfs:
+            _, dfo = builder.xvalid_time_folds(dfi, target_fold_length, split_in_out=True)
+            df_out_list.append(dfo)          
+        df_out = df_out_list  
+
+    # ✅ Handle secondary dataset if required         
+    elif builder.requires_secondary_data():
         source_data_prefix = builder.builder_args.get("source_data_prefix", None)
         if source_data_prefix is None:
             raise ValueError(
-                f"{builder.transfer_type} requires source_data_prefix in builder_args"
-            )
+                f"{builder.transfer_type} requires source_data_prefix in builder_args")
         source_mask = builder.builder_args.get("source_input_mask_regex", None)
-
         source_fpattern = f"{source_data_prefix}_*.csv"
         df_source = read_data(source_fpattern, input_mask_regex=source_mask)
-        # df.to_csv("df_echo.csv")
-        # df_source.to_csv("dfsrc_echo.csv")
-        # This takes df and df_source and puts them on a common index that also has
-        # common (case,datetime) identity
+
         df, df_source = builder.pool_and_align_cases([df, df_source])
-        # Debugging stuff
-        # bigdf = pd.concat([df,df_source], axis = 1)
-        # df.to_csv("bigdf.csv",header=True)
-        # df_source.to_csv("bigother.csv",header=True)
-
-        df_source_in, df_source_out = builder.xvalid_time_folds(
-            df_source, target_fold_length, split_in_out=True
-        )
-
-        df_in, df_out = builder.xvalid_time_folds(
-            df, target_fold_length, split_in_out=True
-        )
-        df_in = df_source_in  # Thus far, ANNs have one set of input even when there are multiple outputs
+        df_source_in, df_source_out = builder.xvalid_time_folds(df_source, target_fold_length, split_in_out=True)
+        df_in, df_out = builder.xvalid_time_folds(df, target_fold_length, split_in_out=True)
+        
+        df_in = df_source_in
         df_out = [df_out, df_source_out]
+
     else:
-        df_in, df_out = builder.xvalid_time_folds(
-            df, target_fold_length, split_in_out=True
-        )
+        df_in, df_out = builder.xvalid_time_folds(df, target_fold_length, split_in_out=True)
 
     # This works regardless of whether df_out is a list or not
     write_reference_outputs(output_prefix, df_out, builder, is_scaled=False)
@@ -165,8 +187,11 @@ def fit_from_config(
     if pool_aggregation:
         df_in["fold"] = df_in["fold"] % pool_size
         if builder.requires_secondary_data():
-            df_out[0]["fold"] = df_out[0]["fold"] % pool_size
-            df_out[1]["fold"] = df_out[1]["fold"] % pool_size
+            if isinstance(df_out, list):
+                for dfo in df_out:
+                    dfo["fold"] = dfo["fold"] % pool_size
+            else:
+                df_out["fold"] = df_out["fold"] % pool_size
 
     # ✅ Scale outputs. Works for single df or list
     # df_out = scale_output(df_out, builder.output_names)
@@ -184,8 +209,7 @@ def fit_from_config(
         init_epochs=init_epochs,
         main_train_rate=main_train_rate,
         main_epochs=main_epochs,
-        pool_size=pool_size,
-    )
+        pool_size=pool_size)
 
     # Perform bulk fit (final consolidated fit for saving)
     ann = bulk_fit(
@@ -200,28 +224,9 @@ def fit_from_config(
         init_train_rate=init_train_rate,
         init_epochs=init_epochs,
         main_train_rate=main_train_rate,
-        main_epochs=main_epochs,
-    )
-
-    # Save the model
-
-    """ Debug
-    import json
-    config = ann.get_config()
-    print(json.dumps(config, indent=2))  # Pretty-print model config
-
-
-    print("Debug: Checking for layers that support masking:")
-    for layer in ann.layers:
-        if hasattr(layer, "supports_masking") and layer.supports_masking:
-            print(f"Layer {layer.name} ({layer.__class__.__name__}) supports masking.")
-    for layer in ann.layers:
-        if hasattr(layer, 'compute_mask'):
-            print(f"Layer {layer.name} has a `compute_mask` method.")
-    """
+        main_epochs=main_epochs)
 
     print(f"Saving model {name} to {save_model_fname+'.h5'}")
-
     ann.save_weights(save_model_fname + ".weights.h5")
     ann.compile(metrics=None, loss=None)
     ann.save(save_model_fname + ".h5", overwrite=True)
@@ -238,14 +243,13 @@ def read_config(configfile):
 
 # ✅ Ensure any builder can be dynamically selected
 def model_builder_from_config(builder_config):
-    """Factory function to create a model builder instance with required arguments."""
-
-    builder_args = builder_config.get("builder_args", {})
-    mbfactory = model_builders[builder_config["builder_name"]]
-    print(builder_config["args"])
-    # ✅ Pass `args` directly, as in the old working version
-    builder = mbfactory(**builder_config["args"], **builder_args)
-
+    """
+    Factory function to create a model builder instance with required arguments.
+    """
+    builder_name = builder_config["builder_name"]
+    args = builder_config.get("args", {})  # stable, step-agnostic
+    mbfactory = model_builders[builder_name]
+    builder = mbfactory(**args)
     return builder
 
 
@@ -305,37 +309,39 @@ def process_config(configfile, proc_steps):
 
 
 def write_reference_outputs(output_prefix, df_out, builder, is_scaled=False):
-    """Writes reference output files for debugging and validation, handling both single and multi-output cases."""
-
+    """
+    Writes reference output files for debugging and validation
+    """
     suffix = "scaled" if is_scaled else "unscaled"
 
-    if isinstance(df_out, list):
+    if not isinstance(df_out, list):
+        ref_out_csv = f"{output_prefix}_xvalid_ref_out_{suffix}.csv"
+        df_out.to_csv(ref_out_csv, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
+        return
+
+    if len(df_out) <= 2:
         primary_df = df_out[0]
-        secondary_df = df_out[1] if builder.requires_secondary_data() else None
-    else:
-        primary_df = df_out
-        secondary_df = None
+        ref_out_csv = f"{output_prefix}_xvalid_ref_out_{suffix}.csv"
+        primary_df.to_csv(ref_out_csv, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
 
-    # ✅ Write primary reference output
-    ref_out_csv = f"{output_prefix}_xvalid_ref_out_{suffix}.csv"
-    primary_df.to_csv(
-        ref_out_csv,
-        float_format="%.3f",
-        date_format="%Y-%m-%dT%H:%M",
-        header=True,
-        index=True,
-    )
+        if len(df_out) == 2 and builder.requires_secondary_data():
+            secondary_df = df_out[1]
+            ref_out_csv_secondary = f"{output_prefix}_xvalid_ref_out_secondary_{suffix}.csv"
+            secondary_df.to_csv(ref_out_csv_secondary, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
+        return
 
-    # ✅ If secondary data exists, write its reference outputs
-    if secondary_df is not None:
-        ref_out_csv_secondary = f"{output_prefix}_xvalid_ref_out_secondary_{suffix}.csv"
-        secondary_df.to_csv(
-            ref_out_csv_secondary,
-            float_format="%.3f",
-            date_format="%Y-%m-%dT%H:%M",
-            header=True,
-            index=True,
-        )
+    try:
+        sc_cfg = builder.builder_args.get("scenarios", []) or []
+    except Exception:
+        sc_cfg = []
+
+    tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
+    if len(tags) != len(df_out):
+        tags = ["base"] + [f"scenario{i}" for i in range(1, len(df_out))]
+
+    for dfi, tag in zip(df_out, tags):
+        fpath = f"{output_prefix}_xvalid_ref_out_{tag}_{suffix}.csv"
+        dfi.to_csv(fpath, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
 
 
 def verify_data_availability(source_data_prefix, target_data_prefix):
@@ -369,5 +375,15 @@ def verify_data_availability(source_data_prefix, target_data_prefix):
 
     print(
         f"✅ Data verified: Found data for {target_data_prefix}"
-        + (f" and {source_data_prefix}" if source_data_prefix else "")
-    )
+        + (f" and {source_data_prefix}" if source_data_prefix else ""))
+    
+
+def _is_multi_scenario_step(builder) -> bool:
+    """
+    Returns True when the current step's builder_args includes a non-empty 'scenarios' list. Used in multi-scenario training.
+    """
+    try:
+        sc = builder.builder_args.get("scenarios", None)
+        return isinstance(sc, list) and len(sc) > 0
+    except Exception:
+        return False

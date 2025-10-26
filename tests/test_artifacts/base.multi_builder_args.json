@@ -1,0 +1,66 @@
+{
+  "transfer_type": "contrastive",
+  "trunk_layers": [
+    {
+      "type": "GRU",
+      "units": 16,
+      "name": "feature1",
+      "return_sequences": true,
+      "trainable": true
+    },
+    {
+      "type": "GRU",
+      "units": 16,
+      "name": "feature2",
+      "return_sequences": true,
+      "trainable": true
+    }
+  ],
+  "branch_layer": {
+    "type": "GRU",
+    "units": 16,
+    "name": "feature3",
+    "return_sequences": false,
+    "trainable": true
+  },
+  "include_source_branch": true,
+  "head_activation": "elu",
+  "init_targets_from_source": true,
+  "source_weight": 1.0,
+  "target_weight": 1.0,
+  "contrast_weight": 0.5,
+  "source_data_prefix": "schism_base",
+  "source_input_mask_regex": [
+    "schism_base_2021\\.csv"
+  ],
+  "scenarios": [
+    {
+      "id": "suisun",
+      "input_prefix": "schism_suisun",
+      "input_mask_regex": [
+        "schism_suisun_2021\\.csv"
+      ]
+    },
+    {
+      "id": "slr",
+      "input_prefix": "schism_slr",
+      "input_mask_regex": [
+        "schism_slr_2021\\.csv"
+      ]
+    },
+    {
+      "id": "cache",
+      "input_prefix": "schism_cache",
+      "input_mask_regex": [
+        "schism_cache_2021\\.csv"
+      ]
+    },
+    {
+      "id": "franks",
+      "input_prefix": "schism_franks",
+      "input_mask_regex": [
+        "schism_franks_2021\\.csv"
+      ]
+    }
+  ]
+}

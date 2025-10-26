@@ -1,0 +1,29 @@
+{
+  "transfer_type": "direct",
+  "ann_output_name": "schism_base",
+  "base_layers": [
+    {
+      "type": "GRU",
+      "units": 16,
+      "name": "feature1",
+      "return_sequences": true,
+      "trainable": true
+    },
+    {
+      "type": "GRU",
+      "units": 16,
+      "name": "feature2",
+      "return_sequences": true,
+      "trainable": true
+    }
+  ],
+  "branch_layer": {
+    "type": "GRU",
+    "units": 16,
+    "name": "feature3",
+    "return_sequences": false,
+    "trainable": true
+  },
+  "include_source_branch": true,
+  "head_activation": "elu"
+}

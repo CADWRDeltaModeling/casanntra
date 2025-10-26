@@ -1,0 +1,95 @@
+# ===========================
+# DIRECT TRANSFER LEARNING CONFIGURATION FILE
+# ===========================
+# This file defines the training sequence for direct staged transfer learning.
+# Each step builds upon prior models, allowing for progressive learning
+# from DSM2->SCHISM BASE, then SCHISM BASE->SCHISM SUISUN in a direct approach.
+# ===========================
+
+model_builder_config:
+  builder_name: MultiStageModelBuilder
+  args:
+    input_names:
+      - northern_flow
+      - exports
+      - sjr_flow
+      - cu_flow
+      - sf_tidal_energy
+      - sf_tidal_filter
+      - dcc
+      - smscg
+    output_names:
+      x2: 100.0
+      pct: 12000.0
+      mal: 12000.0
+      god: 12000.0
+      vol: 12000.0
+      bdl: 12000.0
+      nsl2: 12000.0
+      cse: 12000.0
+      emm2: 3000.0
+      tms: 3000.0
+      anh: 3000.0
+      jer: 2500.0
+      gzl: 12000.0
+      sal: 12000.0
+      frk: 2500.0
+      bac: 1500.0
+      rsl: 1500.0
+      oh4: 1500.0
+      trp: 1500.0
+    ndays: 90
+
+steps:
+- name: dsm2_base
+  input_prefix: dsm2_base
+  input_mask_regex: [dsm2_base_100.\.csv]
+  output_prefix: dsm2_base_gru2
+  save_model_fname: dsm2_base_gru2
+  load_model_fname: None
+  pool_size: 12
+  pool_aggregation: True
+  target_fold_length: 180d
+  init_train_rate: 0.008
+  init_epochs: 10
+  main_train_rate: 0.001
+  main_epochs: 100
+  builder_args:
+    transfer_type: None
+    ann_output_name: dsm2_base
+
+- name: dsm2.schism
+  input_prefix: schism_base
+  input_mask_regex: None
+  output_prefix: dsm2.schism_base_gru2
+  save_model_fname: dsm2.schism_base_gru2
+  load_model_fname: dsm2_base_gru2
+  pool_size: 12
+  pool_aggregation: False
+  target_fold_length: 180d
+  init_train_rate: 0.003
+  init_epochs: 11
+  main_train_rate: 0.001
+  main_epochs: 35
+  builder_args:
+    transfer_type: direct
+    ann_output_name: schsim_base
+
+- name: base.suisun
+  input_prefix: schism_suisun
+  input_mask_regex: None
+  output_prefix: schism_base.suisun_gru2
+  save_model_fname: schism_base.suisun_gru2
+  load_model_fname: dsm2.schism_base_gru2
+  pool_size: 12
+  pool_aggregation: False
+  target_fold_length: 180d
+  init_train_rate: 0.001
+  init_epochs: 12
+  main_train_rate: 0.0004
+  main_epochs: 36
+  builder_args:
+    source_data_prefix: schism_base
+    source_input_mask_regex: [schism_base_2021.csv]
+    transfer_type: direct
+    ann_output_name: schism_suisun

@@ -18,11 +18,6 @@ import os
 import tensorflow as tf
 from tensorflow.keras.layers import Layer
  
-
-
-
-
-
 class ScaledMaskedMAE(tf.keras.losses.Loss):
     """Pickle-safe, TensorFlow-serializable custom loss function for scaled MAE."""
 
@@ -559,6 +554,16 @@ class ModelBuilder(object):
         wrapped_model = Model(inputs=trained_model.input, outputs=unscaled_outputs)
         
         return wrapped_model
+    
+    def is_multi_scenario_step(self) -> bool:
+        try:
+            sc = self.builder_args.get("scenarios", None)
+            return isinstance(sc, list) and len(sc) > 0
+        except Exception:
+            return False
+
+    def map_prediction_keys_to_outputs(self, pred_keys):
+        return None  # Multi-scenario builder will override
 
 
 
@@ -742,5 +747,3 @@ class MLPBuilder1(ModelBuilder):
                 )
         
         return history, ann
-
-

@@ -5,6 +5,7 @@ from casanntra.single_or_list import *
 import traceback
 import pickle
 import base64
+import pandas as pd
 
 
 def single_model_fit(
@@ -18,17 +19,25 @@ def single_model_fit(
     init_train_rate,
     init_epochs,
     main_train_rate,
-    main_epochs,
-):
+    main_epochs):
+
     input_layers = builder.input_layers()
-    # Todo: train_model is the augmented model that includes a pass through of output
-    #       ann is the main model for inference
     ann = builder.build_model(input_layers, df_in)
-    # todo: this was train_model
+
     print("Fitting model in single_model_fit")
-    print("Fit input keys:", fit_in.keys())
-    print("Model expected inputs:", ann.input.keys())
+    try:
+        print("Fit input keys:", list(fit_in.keys()))
+    except Exception:
+        print("Fit input type:", type(fit_in))
+
+    try:
+        exp_inputs = [t.name for t in ann.inputs]
+    except Exception:
+        exp_inputs = ann.inputs
+
+    print("Model expected inputs:", exp_inputs)
     print("Should be the same")
+
     history, ann = builder.fit_model(
         ann,
         fit_in,
@@ -38,17 +47,14 @@ def single_model_fit(
         init_train_rate=init_train_rate,
         init_epochs=init_epochs,
         main_train_rate=main_train_rate,
-        main_epochs=main_epochs,
-    )
+        main_epochs=main_epochs)
 
-    # Todo
     print("Predicting data in single_model_fit")
     test_pred = ann.predict(test_in)
-    # history_serialized = base64.b64encode(pickle.dumps(history.history)).decode()
     print("Prediction complete")
     del ann
     print(f"Return type {type(test_pred)}")
-    return test_pred  # , history_serialized
+    return test_pred
 
 
 def bulk_fit(
@@ -128,9 +134,6 @@ def bulk_fit(
 
     return ann
 
-    # xvalid_fit_multi(df_in,df_out,builder,plot_folds="all",plot_locs=plot_locs,
-    #                 out_prefix=output_prefix, init_train_rate=init_train_rate,
-    #                 init_epochs=init_epochs main_train_rate=None, main_epochs=-1, pool_size=pool_size)
 
 def reorder(pkeys):
     """Reorder the keys to match the order of the output_list"""
@@ -147,89 +150,68 @@ def xvalid_fit_multi(
     main_train_rate,
     main_epochs,
     out_prefix,
-    pool_size,
-):
-    """Splits up the input by fold, withholding each fold in turn, building and training the model,
-    and then evaluating the withheld data."""
+    pool_size):
+    """
+    Splits input by fold, fits models per fold (withheld CV), merges predictions,
+    and writes x-valid CSVs. Multi-scenario outputs are written with descriptive,
+    scenario-id-based filenames.
+    """
 
-    num_outputs = builder.num_outputs()  # Get number of ANN output tensors
-    output_list = builder.output_list()  # Get the list of locations output in each tensor
+    num_outputs = builder.num_outputs()          
+    output_list = builder.output_list()          
 
-    # df_in will not be a list at this point
-    # todo: it could contain entries for which one df_out has no outputs
     inputs_lagged = builder.calc_antecedent_preserve_cases(df_in)
 
-    # df_in will not be a list at this point
     if isinstance(df_out, list):
         outputs_trim = [dfo.loc[inputs_lagged.index, :] for dfo in df_out]
     else:
         outputs_trim = df_out.loc[inputs_lagged.index, :]
 
-    # create an empty data frame matching the output columns,
-    # trimmed output rows plus datetime,case and fold
-    # returns list if df_out is a list
-
-    outputs_xvalid = allocate_receiving_df(outputs_trim, output_list)  # should
+    outputs_xvalid, histories = allocate_receiving_df(outputs_trim, output_list), {}
 
     futures = []
     foldmap = {}
-    histories = {}
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=pool_size) as executor:
         for ifold in df_in.fold.unique():
             print(f"Scheduling fit for fold {ifold}")
+
             fit_in = inputs_lagged.loc[inputs_lagged.fold != ifold, :]
             test_in = inputs_lagged.loc[inputs_lagged.fold == ifold, :]
 
             if isinstance(df_out, list):
                 fit_out = [df.loc[fit_in.index, output_list] for df in df_out]
                 test_out = [df.loc[test_in.index, output_list] for df in df_out]
+                rep = fit_out[0]
+                print(f"ifold={ifold} # train input rows={fit_in.shape[0]} # train out rows={rep.shape[0]}")
+                print(f"ifold={ifold} # test input rows={test_in.shape[0]} # test  out rows={rep.shape[0]}")
             else:
                 fit_out = df_out.loc[fit_in.index, output_list]
                 test_out = df_out.loc[test_in.index, output_list]
+                print(f"ifold={ifold} # train input rows={fit_in.shape[0]} # train out rows={fit_out.shape[0]}")
+                print(f"ifold={ifold} # test input rows={test_in.shape[0]} # test  out rows={test_out.shape[0]}")
 
-            if isinstance(fit_out, list):
-                rep = fit_out[0] if isinstance(fit_out, list) else fit_out
-                print(
-                    f"ifold={ifold} # train input data rows = {fit_in.shape[0]} # train out rows = {rep.shape[0]}"
-                )
-                print(
-                    f"ifold={ifold} # test input data rows = {test_in.shape[0]} # test out rows = {rep.shape[0]}"
-                )
-
-            # ✅ Convert DataFrame inputs into structured dicts
             idx = pd.IndexSlice
-            # These libraries separate the inputs into individual dataframes matching the input names
-            fit_in = builder.df_by_feature_and_time(fit_in).drop(
-                ["datetime", "case", "fold"], level="var", axis=1
-            )
-            fit_in = {
-                name: fit_in.loc[:, idx[name, :]].droplevel("var", axis=1)
-                for name in builder.input_names
-            }
+            fit_in_split = builder.df_by_feature_and_time(fit_in).drop(["datetime", "case", "fold"], level="var", axis=1)
+            fit_in_split = {name: fit_in_split.loc[:, idx[name, :]].droplevel("var", axis=1) for name in builder.input_names}
 
-            test_in = builder.df_by_feature_and_time(test_in).drop(
-                ["datetime", "case", "fold"], level="var", axis=1
-            )
-            test_in = {
-                name: test_in.loc[:, idx[name, :]].droplevel("var", axis=1)
-                for name in builder.input_names
-            }
+            test_in_split = builder.df_by_feature_and_time(test_in).drop(["datetime", "case", "fold"], level="var", axis=1)
+            test_in_split = {name: test_in_split.loc[:, idx[name, :]].droplevel("var", axis=1) for name in builder.input_names}
 
             future = executor.submit(
                 single_model_fit,
                 builder,
                 df_in,
-                fit_in,
+                fit_in_split,
                 fit_out,
-                test_in,
+                test_in_split,
                 test_out,
                 out_prefix=out_prefix,
                 init_epochs=init_epochs,
                 init_train_rate=init_train_rate,
                 main_epochs=main_epochs,
-                main_train_rate=main_train_rate,
-            )
+                main_train_rate=main_train_rate)
+            
             futures.append(future)
             foldmap[future] = ifold
 
@@ -238,76 +220,93 @@ def xvalid_fit_multi(
             ifold = foldmap[future]
             test_pred = future.result()
             print(f"Test prediction data type: {type(test_pred)}")
-            # history = pickle.loads(base64.b64decode(history_encoded))
             test_in = inputs_lagged.loc[inputs_lagged.fold == ifold, :]
-            # Todo: This is a bit hack with all the switching logic
+
             if isinstance(outputs_xvalid, list):
-                print("\nUpdating master xvalidation data structure (multiple output version)")
-                for i in range(num_outputs):
-                    if isinstance(test_pred, dict):
-                        pkeys = list(test_pred.keys())
-                        if len(pkeys) != num_outputs:
-                            print(f"prediction output keys: {pkeys}")
-                            raise ValueError(f"num_outputs {num_outputs} does not match number of keys in test_pred {len(pkeys)}")
-                        pkeys = reorder(pkeys)  # Reorder keys without removing any
-                        try:
-                            tensor_key = pkeys[i]
-                            if "contrast" in tensor_key:
-                                continue
-                            outputs_xvalid[i].loc[test_in.index, output_list] = test_pred[tensor_key]
-                        except Exception as e:
-                            print("failure in tensor key")
-                            print(pkeys)
-                            print(tensor_key)
-                            raise e
+                print("\nUpdating master xvalidation structure (multi-output version)")
+
+                if isinstance(test_pred, dict):
+                    pkeys = list(test_pred.keys())
+                    map_fn = getattr(builder, "map_prediction_keys_to_outputs", None)
+                    if callable(map_fn):
+                        supervised_keys = map_fn(pkeys)
                     else:
-                        outputs_xvalid[i].loc[test_in.index, output_list] = test_pred[i]
-            elif isinstance(outputs_xvalid,pd.DataFrame):
-                if isinstance(test_pred,dict):
-                    if len(test_pred)>1:
-                        raise ValueError("Multiple outputs in single output model version")
+                        supervised_keys = None
+
+                    if supervised_keys:
+                        if len(supervised_keys) != len(outputs_xvalid):
+                            raise ValueError(
+                                f"Head mapping mismatch: {len(supervised_keys)} keys vs {len(outputs_xvalid)} receivers"
+                            )
+                        for j, key in enumerate(supervised_keys):
+                            outputs_xvalid[j].loc[test_in.index, output_list] = test_pred[key]
+                    else:
+                        ordered = reorder(pkeys)
+                        j = 0
+                        for key in ordered:
+                            if "contrast" in key:
+                                continue
+                            outputs_xvalid[j].loc[test_in.index, output_list] = test_pred[key]
+                            j += 1
+                else:
+                    for j in range(len(outputs_xvalid)):
+                        outputs_xvalid[j].loc[test_in.index, output_list] = test_pred[j]
+
+            elif isinstance(outputs_xvalid, pd.DataFrame):
+                if isinstance(test_pred, dict):
+                    if len(test_pred) != 1:
+                        raise ValueError("Multiple outputs returned for a single-output model.")
                     test_pred = list(test_pred.values())[0]
-                print("\nUpdating master xvalidation data structure (single output version)")
+                print("\nUpdating master xvalidation structure (single-output version)")
                 outputs_xvalid.loc[test_in.index, output_list] = test_pred
-                print("Done")
-            else: 
-                raise ValueError("Type of ")
+
+            else:
+                raise ValueError("Unsupported outputs_xvalid container type.")
+
         except Exception as err:
-            print(f"Exception in (probably) in fold: {ifold}")
+            print(f"Exception likely in fold {ifold}")
             traceback.print_tb(err.__traceback__)
             raise err
 
-    full_col_list = ["datetime", "case", "fold"] + output_list
-    print("Writing master xvalidation data structure to file")
+    print("Writing master xvalidation outputs to file(s)")
+
     if isinstance(outputs_xvalid, list):
-        print("Multiple structures")
-        for i in range(len(outputs_xvalid)):
-            outxfile = f"{out_prefix}_xvalid_{i}.csv"
-            outputs_xvalid[i][output_list] = outputs_xvalid[i][output_list].astype(
-                float
-            )
-            print(f"writing to file {i} {outxfile}")
-            print(outputs_xvalid[i])
-            outputs_xvalid[i].to_csv(
+        if getattr(builder, "is_multi_scenario_step", lambda: False)():
+            try:
+                sc_cfg = builder.builder_args.get("scenarios", []) or []
+            except Exception:
+                sc_cfg = []
+            tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
+            if len(tags) != len(outputs_xvalid):
+                tags = ["base"] + [f"scenario{i}" for i in range(1, len(outputs_xvalid))]
+        else:
+            tags = [str(i) for i in range(len(outputs_xvalid))]
+
+        for df_recv, tag in zip(outputs_xvalid, tags):
+            outxfile = f"{out_prefix}_xvalid_{tag}.csv"
+            df_recv[output_list] = df_recv[output_list].astype(float)
+            df_recv.to_csv(
                 outxfile,
                 float_format="%.3f",
                 date_format="%Y-%m-%dT%H:%M",
                 header=True,
                 index=True,
             )
-            print("and now ")
-            print(outputs_xvalid[i])
+            print(f"[OK] wrote {outxfile}")
+
     else:
-        print("Single Structure")
         outputs_xvalid[output_list] = outputs_xvalid[output_list].astype(float)
+        outxfile = f"{out_prefix}_xvalid.csv"
         outputs_xvalid.to_csv(
-            f"{out_prefix}_xvalid.csv",
+            outxfile,
             float_format="%.3f",
             date_format="%Y-%m-%dT%H:%M",
             header=True,
             index=True,
         )
-    print("Done writing\n\n")
+        print(f"[OK] wrote {outxfile}")
+
+    print("Done writing\n")
     return outputs_xvalid, histories
 
 
