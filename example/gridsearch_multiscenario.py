@@ -17,7 +17,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
 CACHE = CacheManager(str(CACHE_DB))
 
-BASE_CONFIG_FILE = (SCRIPT_DIR / "transfer_config_multi.yaml").as_posix()
+BASE_CONFIG_FILE = (SCRIPT_DIR / "transfer_config_multiscenario.yaml").as_posix()
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.multi"]
 MASTER_SUMMARY = (SCRIPT_DIR / f"gridsearch_{RUN_ID}_master_results.csv").as_posix()
 

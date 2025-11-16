@@ -12,7 +12,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
 CACHE = CacheManager(str(CACHE_DB))    
 
-BASE_CONFIG_FILE = "transfer_config_contrastive.yml"
+BASE_CONFIG_FILE = "transfer_config_multistage.yml"
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.suisun"]
 MASTER_SUMMARY = f"gridsearch_{RUN_ID}_master_results.csv"
 MODEL_NAMES = ["base.suisun", "base.suisun-secondary"]

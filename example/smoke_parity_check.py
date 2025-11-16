@@ -94,7 +94,7 @@ def _snapshot_layers(model, layer_names: List[str]) -> Dict[str, Dict]:
 
 
 def main():
-    cfg_path = Path(__file__).resolve().parent / "transfer_config_multi.yaml"
+    cfg_path = Path(__file__).resolve().parent / "transfer_config_multiscenario.yaml"
     input_names, output_names, ndays = _load_core_args(str(cfg_path))
     outdim = len(output_names)
 
