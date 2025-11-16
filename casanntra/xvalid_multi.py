@@ -8,6 +8,27 @@ import base64
 import pandas as pd
 
 
+def _multi_scenario_tags(builder, count):
+    is_ms = getattr(builder, "is_multi_scenario_step", lambda: False)()
+    if not is_ms:
+        return [str(i) for i in range(count)]
+
+    try:
+        sc_cfg = builder.builder_args.get("scenarios", []) or []
+    except Exception:
+        sc_cfg = []
+
+    tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
+    if len(tags) != count:
+        tags = ["base"] + [f"scenario{i}" for i in range(1, count)]
+    return tags
+
+
+def _ordered_outputs(builder, outputs):
+    tags = _multi_scenario_tags(builder, len(outputs))
+    return list(zip(outputs, tags))
+
+
 def single_model_fit(
     builder,
     df_in,
@@ -271,18 +292,8 @@ def xvalid_fit_multi(
     print("Writing master xvalidation outputs to file(s)")
 
     if isinstance(outputs_xvalid, list):
-        if getattr(builder, "is_multi_scenario_step", lambda: False)():
-            try:
-                sc_cfg = builder.builder_args.get("scenarios", []) or []
-            except Exception:
-                sc_cfg = []
-            tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
-            if len(tags) != len(outputs_xvalid):
-                tags = ["base"] + [f"scenario{i}" for i in range(1, len(outputs_xvalid))]
-        else:
-            tags = [str(i) for i in range(len(outputs_xvalid))]
-
-        for df_recv, tag in zip(outputs_xvalid, tags):
+        ordered = _ordered_outputs(builder, outputs_xvalid)
+        for df_recv, tag in ordered:
             outxfile = f"{out_prefix}_xvalid_{tag}.csv"
             df_recv[output_list] = df_recv[output_list].astype(float)
             df_recv.to_csv(

@@ -31,6 +31,27 @@ if MultiScenarioModelBuilder is not None:
     model_builders["MultiScenarioModelBuilder"] = MultiScenarioModelBuilder
 
 
+def _multi_scenario_tags(builder, count):
+    is_ms = getattr(builder, "is_multi_scenario_step", lambda: False)()
+    if not is_ms:
+        return [str(i) for i in range(count)]
+
+    try:
+        sc_cfg = builder.builder_args.get("scenarios", []) or []
+    except Exception:
+        sc_cfg = []
+
+    tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
+    if len(tags) != count:
+        tags = ["base"] + [f"scenario{i}" for i in range(1, count)]
+    return tags
+
+
+def _ordered_outputs(builder, outputs):
+    tags = _multi_scenario_tags(builder, len(outputs))
+    return list(zip(outputs, tags))
+
+
 def fit_from_config(
     builder,
     name,
@@ -170,12 +191,16 @@ def fit_from_config(
         source_fpattern = f"{source_data_prefix}_*.csv"
         df_source = read_data(source_fpattern, input_mask_regex=source_mask)
 
-        df, df_source = builder.pool_and_align_cases([df, df_source])
+        df_source, df = builder.pool_and_align_cases([df_source, df])
         df_source_in, df_source_out = builder.xvalid_time_folds(df_source, target_fold_length, split_in_out=True)
         df_in, df_out = builder.xvalid_time_folds(df, target_fold_length, split_in_out=True)
-        
+
         df_in = df_source_in
         df_out = [df_out, df_source_out]
+
+        # Guard against future builders that expect [base, scenario] ordering
+        if getattr(builder, "is_multi_scenario_step", lambda: False)():
+            df_out = [df_source_out, df_out[0]]
 
     else:
         df_in, df_out = builder.xvalid_time_folds(df, target_fold_length, split_in_out=True)
@@ -319,6 +344,15 @@ def write_reference_outputs(output_prefix, df_out, builder, is_scaled=False):
         df_out.to_csv(ref_out_csv, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
         return
 
+    is_ms = getattr(builder, "is_multi_scenario_step", lambda: False)()
+
+    if is_ms:
+        ordered = _ordered_outputs(builder, df_out)
+        for dfi, tag in ordered:
+            fpath = f"{output_prefix}_xvalid_ref_out_{tag}_{suffix}.csv"
+            dfi.to_csv(fpath, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
+        return
+
     if len(df_out) <= 2:
         primary_df = df_out[0]
         ref_out_csv = f"{output_prefix}_xvalid_ref_out_{suffix}.csv"
@@ -330,17 +364,8 @@ def write_reference_outputs(output_prefix, df_out, builder, is_scaled=False):
             secondary_df.to_csv(ref_out_csv_secondary, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
         return
 
-    try:
-        sc_cfg = builder.builder_args.get("scenarios", []) or []
-    except Exception:
-        sc_cfg = []
-
-    tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
-    if len(tags) != len(df_out):
-        tags = ["base"] + [f"scenario{i}" for i in range(1, len(df_out))]
-
-    for dfi, tag in zip(df_out, tags):
-        fpath = f"{output_prefix}_xvalid_ref_out_{tag}_{suffix}.csv"
+    for i, dfi in enumerate(df_out):
+        fpath = f"{output_prefix}_xvalid_ref_out_{i}_{suffix}.csv"
         dfi.to_csv(fpath, float_format="%.3f", date_format="%Y-%m-%dT%H:%M", header=True, index=True)
 
 
@@ -380,10 +405,19 @@ def verify_data_availability(source_data_prefix, target_data_prefix):
 
 def _is_multi_scenario_step(builder) -> bool:
     """
-    Returns True when the current step's builder_args includes a non-empty 'scenarios' list. Used in multi-scenario training.
+    Returns True when the builder is configured for a multi-scenario transfer step.
     """
+    # Prefer explicit builder introspection when available
+    if hasattr(builder, "is_multi_scenario_step"):
+        try:
+            return bool(builder.is_multi_scenario_step())
+        except Exception:
+            pass
+
     try:
-        sc = builder.builder_args.get("scenarios", None)
-        return isinstance(sc, list) and len(sc) > 0
+        scenarios = getattr(builder, "builder_args", {}).get("scenarios", None)
     except Exception:
-        return False
+        scenarios = None
+
+    requires_secondary = getattr(builder, "requires_secondary_data", lambda: False)()
+    return bool(requires_secondary and isinstance(scenarios, list) and len(scenarios) > 0)

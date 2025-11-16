@@ -5,55 +5,13 @@ from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
 
-def _canon_transfer(val):
-    if val in (None, "None", "null", "", "NULL"):
-        return None
-    return str(val).lower()
-
-def _expand_outdir(p: str) -> str:
-    if p in (None, "None"):
-        return p
-    p = p.replace("{output_dir}", str(OUTPUT_DIR))
-    q = Path(p)
-    if not q.is_absolute():
-        if str(q).startswith("example/"):
-            if SCRIPT_DIR.name.lower() == "example":
-                q = (SCRIPT_DIR / q.relative_to("example")).resolve()
-            else:
-                q = (SCRIPT_DIR / q).resolve()
-        else:
-            q = (OUTPUT_DIR / q.name).resolve()
-    return q.as_posix()
-
-def _dataset_key_from_outputs(outputs: dict) -> str:
-    canonical = json.dumps(
-        {str(k).lower(): float(v) for k, v in outputs.items()},
-        sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-def _scenarios_fingerprint(scenarios: list, source_data_prefix: str, source_mask) -> str:
-    skinny = {
-        "source_data_prefix": source_data_prefix,
-        "source_input_mask_regex": list(source_mask) if isinstance(source_mask, (list, tuple)) else source_mask,
-        "scenarios": [
-            {
-                "id": sc.get("id"),
-                "input_prefix": sc.get("input_prefix"),
-                "input_mask_regex": sc.get("input_mask_regex"),
-            }
-            for sc in (scenarios or [])
-        ],
-    }
-    canonical = json.dumps(skinny, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
-RUN_ID = "PLOT_TEST"
+RUN_ID = "MSCEN_v1.4_MULTI_SCEN_BRANCH"
 SCRIPT_DIR = Path(__file__).resolve().parent
+
 if SCRIPT_DIR.name.lower() == "example":
-    OUTPUT_DIR  = (SCRIPT_DIR / "output").resolve()
+    OUTPUT_DIR = (SCRIPT_DIR / "output").resolve()
 else:
-    OUTPUT_DIR  = (SCRIPT_DIR / "example" / "output").resolve()
+    OUTPUT_DIR = (SCRIPT_DIR / "example" / "output").resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
@@ -61,23 +19,30 @@ CACHE = CacheManager(str(CACHE_DB))
 
 BASE_CONFIG_FILE = (SCRIPT_DIR / "transfer_config_multi.yaml").as_posix()
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.multi"]
-MASTER_SUMMARY   = (SCRIPT_DIR / f"gridsearch_{RUN_ID}_master_results.csv").as_posix()
+MASTER_SUMMARY = (SCRIPT_DIR / f"gridsearch_{RUN_ID}_master_results.csv").as_posix()
+
+STATIONS = ["cse","bdl","rsl","emm2","jer","sal","frk","bac","oh4", "x2","mal","god","gzl","vol","pct","nsl2","tms","anh","trp"]
 
 HYPERPARAM_SPACE = {
-    "trunk_layers": [[
-        {"type":"GRU","units":16,"return_sequences":True,"name":"feature1","trainable":True},
-        {"type":"GRU","units":16,"return_sequences":True,"name":"feature2","trainable":True}]],
-    "freeze_schedule": [[0, 0, 0]],
+    "trunk_layers": [
+        [{"type": "GRU",  "units": 32, "return_sequences": True, "name": "lay1", "trainable": True},
+         {"type": "GRU",  "units": 16, "return_sequences": False, "name": "lay2", "trainable": True}]],
+
+    "freeze_schedule": [[0, 0, 0], [0, 0, 1], [0, 1, 1]],
     "ndays": [105],
-    "dsm2_init_lr":[0.008], "dsm2_main_lr":[0.001],
-    "dsm2_init_epochs":[1], "dsm2_main_epochs":[10],
-    "schism_init_lr":[0.003], "schism_main_lr":[0.001],
-    "schism_init_epochs":[1],"schism_main_epochs":[10],
-    "multi_init_lr":[0.001],  "multi_main_lr":[0.0005],
-    "multi_init_epochs":[1], "multi_main_epochs":[5],
-    "source_weight":[1.0],
-    "target_weight":[1.0],
-    "contrast_weight":[0.5]}
+    "dsm2_init_lr": [0.008], "dsm2_main_lr": [0.001],
+    "dsm2_init_epochs": [10], "dsm2_main_epochs": [100],
+    "schism_init_lr": [0.003], "schism_main_lr": [0.001],
+    "schism_init_epochs": [10], "schism_main_epochs": [35],
+    "multi_init_lr": [0.001],          
+    "multi_main_lr": [0.0005],    
+    "multi_init_epochs": [10],
+    "multi_main_epochs": [35],
+    "source_weight": [1.0],
+    "target_weight": [1.0],
+    "contrast_weight": [0.5],
+    "per_scenario_branch": [True],
+    "branch_layers": [[{"type": "GRU", "units": 16, "return_sequences": False, "name": "branch_3", "trainable": True}]]}
 
 def compute_metrics(y_true, y_pred):
     mask = (~pd.isnull(y_true)) & (~pd.isnull(y_pred))
@@ -91,22 +56,27 @@ def compute_metrics(y_true, y_pred):
     r    = float(np.corrcoef(yt,yp)[0,1]) if len(yt) > 1 else np.nan
     return {"mae":mae,"rmse":rmse,"nse":nse,"pearson_r":r}
 
-def load_and_merge_ms(prefix: str, tag: str):
-    ref_csv = f"{prefix}_xvalid_ref_out_{tag}_unscaled.csv"
-    ann_csv = f"{prefix}_xvalid_{tag}.csv"
+def _first_existing(*paths):
+    for p in paths:
+        if Path(p).exists():
+            return p
+    raise FileNotFoundError(" / ".join(paths))
 
-    if not Path(ref_csv).exists() or not Path(ann_csv).exists():
-        raise FileNotFoundError(ref_csv + " / " + ann_csv)
-    
+def load_and_merge_ms(prefix: str, tag: str):
+
+    ref_csv = _first_existing(f"{prefix}_xvalid_ref_out_{tag}_unscaled.csv", f"{prefix}_xvalid_ref_{tag}_unscaled.csv", f"{prefix}_xvalid_ref_{tag}.csv")
+    ann_csv = _first_existing(f"{prefix}_xvalid_out_{tag}_unscaled.csv", f"{prefix}_xvalid_{tag}_unscaled.csv", f"{prefix}_xvalid_{tag}.csv")
+
     df_ref = pd.read_csv(ref_csv, parse_dates=["datetime"])
     df_ann = pd.read_csv(ann_csv, parse_dates=["datetime"])
+
     df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
     df_ann["case"] = pd.to_numeric(df_ann["case"], errors="coerce")
     df_ref["datetime"] = pd.to_datetime(df_ref["datetime"], errors="coerce")
     df_ann["datetime"] = pd.to_datetime(df_ann["datetime"], errors="coerce")
+
     df = pd.merge(df_ref, df_ann, on=["datetime","case"], how="inner", suffixes=("", "_pred"))
     df = df.sort_values(["case","datetime"]).reset_index(drop=True)
-
     return df
 
 def plot_timeseries_all_cases(df, station, tag, out_dir, n_cases=7):
@@ -115,7 +85,7 @@ def plot_timeseries_all_cases(df, station, tag, out_dir, n_cases=7):
         return
 
     df = df.copy()
-    df[stcol]  = pd.to_numeric(df[stcol], errors="coerce")
+    df[stcol] = pd.to_numeric(df[stcol], errors="coerce")
     df[stpred] = pd.to_numeric(df[stpred], errors="coerce")
     cases = [c for c in pd.unique(df["case"]) if pd.notnull(c)]
     try:
@@ -182,11 +152,54 @@ def load_yml(p):
 def save_yml(o,p): 
     Path(p).write_text(yaml.safe_dump(o, sort_keys=False))
 
+
+def _canon_transfer(val):
+    if val in (None, "None", "null", "", "NULL"):
+        return None
+    return str(val).lower()
+
+def _expand_outdir(p: str) -> str:
+    if p in (None, "None"):
+        return p
+    p = p.replace("{output_dir}", str(OUTPUT_DIR))
+    q = Path(p)
+    if not q.is_absolute():
+        if str(q).startswith("example/"):
+            if SCRIPT_DIR.name.lower() == "example":
+                q = (SCRIPT_DIR / q.relative_to("example")).resolve()
+            else:
+                q = (SCRIPT_DIR / q).resolve()
+        else:
+            q = (OUTPUT_DIR / q.name).resolve()
+    return q.as_posix()
+
+def _dataset_key_from_outputs(outputs: dict) -> str:
+    canonical = json.dumps(
+        {str(k).lower(): float(v) for k, v in outputs.items()},
+        sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+def _scenarios_fingerprint(scenarios: list, source_data_prefix: str, source_mask) -> str:
+    skinny = {
+        "source_data_prefix": source_data_prefix,
+        "source_input_mask_regex": list(source_mask) if isinstance(source_mask, (list, tuple)) else source_mask,
+        "scenarios": [
+            {
+                "id": sc.get("id"),
+                "input_prefix": sc.get("input_prefix"),
+                "input_mask_regex": sc.get("input_mask_regex"),
+            }
+            for sc in (scenarios or [])
+        ],
+    }
+    canonical = json.dumps(skinny, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
 def main() -> None:
     
     Path(MASTER_SUMMARY).unlink(missing_ok=True)
     base_cfg = load_yml(BASE_CONFIG_FILE)
-    grid_keys  = list(HYPERPARAM_SPACE.keys())
+    grid_keys = list(HYPERPARAM_SPACE.keys())
     all_combos = [dict(zip(grid_keys, combo)) for combo in itertools.product(*[HYPERPARAM_SPACE[k] for k in grid_keys])]
     outputs_map = base_cfg["model_builder_config"]["args"]["output_names"]
     stations_in_yaml = list(outputs_map.keys())
@@ -228,38 +241,45 @@ def main() -> None:
             for k in ("save_model_fname", "load_model_fname", "output_prefix"):
                 step[k] = _expand_outdir(step.get(k))
 
-            if step["name"] == "base.multi":
-                multi_prefix_for_eval = step["output_prefix"]
-
-            if step_idx == 0:
-                step.update(init_train_rate=combo["dsm2_init_lr"],
-                            main_train_rate=combo["dsm2_main_lr"],
-                            init_epochs =combo["dsm2_init_epochs"],
-                            main_epochs =combo["dsm2_main_epochs"])
-                
-            elif step_idx == 1:
-                step.update(init_train_rate=combo["schism_init_lr"],
-                            main_train_rate=combo["schism_main_lr"],
-                            init_epochs =combo["schism_init_epochs"],
-                            main_epochs =combo["schism_main_epochs"])
-                
-            else:
-                step.update(init_train_rate =combo["multi_init_lr"],
-                            main_train_rate =combo["multi_main_lr"],
-                            init_epochs =combo["multi_init_epochs"],
-                            main_epochs =combo["multi_main_epochs"])
-
             bargs = step.get("builder_args", {}) or {}
 
+            if step["name"] == "base.multi":
+                multi_prefix_for_eval = step["output_prefix"]
+                bargs["per_scenario_branch"] = combo["per_scenario_branch"]
+                bargs["branch_layers"] = copy.deepcopy(combo["branch_layers"])
+                branch_flag = combo["per_scenario_branch"]
+                branch_spec = combo["branch_layers"]
+            else:
+                branch_flag = None
+                branch_spec = None
+
+            if step_idx == 0:
+                step.update(init_train_rate = combo["dsm2_init_lr"], main_train_rate = combo["dsm2_main_lr"], init_epochs = combo["dsm2_init_epochs"],
+                            main_epochs = combo["dsm2_main_epochs"])
+                
+            elif step_idx == 1:
+                step.update(init_train_rate = combo["schism_init_lr"], main_train_rate = combo["schism_main_lr"], init_epochs = combo["schism_init_epochs"],
+                            main_epochs = combo["schism_main_epochs"])
+
+            else:
+                step.update(init_train_rate = combo["multi_init_lr"], main_train_rate = combo["multi_main_lr"], init_epochs = combo["multi_init_epochs"], 
+                            main_epochs = combo["multi_main_epochs"])
+
             trunk_template = copy.deepcopy(combo["trunk_layers"])
+            # Ensure the final GRU before the heads collapses time for both direct and contrastive steps
+            if trunk_template:
+                trunk_template[-1]["return_sequences"] = False
+            base_template = copy.deepcopy(trunk_template)
             freezeN = fsched[step_idx] if step_idx < len(fsched) else 0
             for j, layer in enumerate(trunk_template):
                 layer["trainable"] = bool(j >= freezeN)
+            for j, layer in enumerate(base_template):
+                layer["trainable"] = bool(j >= freezeN)
 
             if bargs.get("transfer_type", None) in (None, "None", "direct", "Direct"):
-                bargs["base_layers"]  = trunk_template
+                bargs["base_layers"] = copy.deepcopy(base_template)
             else:
-                bargs["trunk_layers"] = trunk_template
+                bargs["trunk_layers"] = copy.deepcopy(trunk_template)
 
             bargs["source_weight"] = combo["source_weight"]
             bargs["target_weight"] = combo["target_weight"]
@@ -268,34 +288,37 @@ def main() -> None:
             step["builder_args"] = bargs
 
             transfer_type = _canon_transfer(bargs.get("transfer_type"))
+            
             recipe = {
-                "input_prefix" : step["input_prefix"],
-                "transfer_type" : transfer_type,
-                "ndays" : combo["ndays"],
-                "freeze_index" : freezeN,
-                "init_lr" : step["init_train_rate"],
-                "main_lr" : step["main_train_rate"],
-                "init_epochs" : step["init_epochs"],
-                "main_epochs" : step["main_epochs"],
-                "dataset_key" : dataset_key,
-                "trunk_layers" : trunk_template,
-                "scenarios_key" : scenarios_key if step["name"] == "base.multi" else None,
-                "source_weight" : combo["source_weight"],
-                "target_weight" : combo["target_weight"],
-                "contrast_weight": combo["contrast_weight"]}
+                "input_prefix": step["input_prefix"],
+                "transfer_type": transfer_type,
+                "ndays": combo["ndays"],
+                "freeze_index": freezeN,
+                "init_lr": step["init_train_rate"],
+                "main_lr": step["main_train_rate"],
+                "init_epochs": step["init_epochs"],
+                "main_epochs": step["main_epochs"],
+                "dataset_key": dataset_key,
+                "trunk_layers": trunk_template,
+                "scenarios_key": scenarios_key if step["name"] == "base.multi" else None,
+                "source_weight": combo["source_weight"],
+                "target_weight": combo["target_weight"],
+                "contrast_weight": combo["contrast_weight"],
+                "per_scenario_branch": branch_flag,
+                "branch_layers": branch_spec}
 
-            abs_model_path  = str(Path(step["save_model_fname"]).resolve())
+            abs_model_path = str(Path(step["save_model_fname"]).resolve())
             abs_prefix_path = str(Path(step["output_prefix"]).resolve())
 
-            print(f"INFO | {trial_name} | {step['name']} | querying cache")
+            print(f"{trial_name} | {step['name']}: querying cache")
             hit, info = CACHE.check(step["name"], recipe, abs_model_path, abs_prefix_path, parent_hash)
 
             if hit:
-                print(f"INFO | {trial_name} | {step['name']} | cache HIT: SKIP")
+                print(f"{trial_name} | {step['name']}: cache HIT: SKIP")
                 parent_hash = info
                 continue
 
-            print(f"INFO  | {trial_name} | {step['name']} | cache MISS: TRAIN")
+            print(f"{trial_name} | {step['name']}: cache MISS: TRAIN")
 
             tmp_yaml = SCRIPT_DIR / f"tmp_{trial_name}_{step['name']}.yml"
             save_yml({"output_dir": str(OUTPUT_DIR), "model_builder_config": mod_cfg["model_builder_config"], "steps": [step]}, tmp_yaml)
@@ -303,7 +326,7 @@ def main() -> None:
             try:
                 process_config(tmp_yaml, [step["name"]])
             except Exception as e:
-                print(f"ERROR | {trial_name} | {step['name']}: {e}")
+                print(f"ERROR {trial_name}: {step['name']}: {e}")
                 traceback.print_exc()
                 break
 
@@ -315,7 +338,7 @@ def main() -> None:
             parent_hash = key_hash
 
         if multi_prefix_for_eval is None:
-            print("WARN | Multi-scenario prefix not captured; skip evaluation for this trial.")
+            print("Multi-scenario prefix not captured; skip evaluation for this trial.")
             continue
 
         trial_dir = SCRIPT_DIR / f"{RUN_ID}_{trial_name}_results"
@@ -333,7 +356,7 @@ def main() -> None:
         df = pd.read_csv(MASTER_SUMMARY)
         if "mean_nse_overall" in df.columns:
             df = df.sort_values("mean_nse_overall", ascending=False)
-        print("\n FINAL SCOREBOARD: ")
+        print("Final Results:")
         print(df.head(20).to_string(index=False))
     else:
         print("No successful trials recorded.")

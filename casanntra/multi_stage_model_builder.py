@@ -37,7 +37,7 @@ class MultiStageModelBuilder(GRUBuilder2):
         self.frozen_layer_names = [spec.get("name", f"feature_{idx+1}") for idx, spec in enumerate(self.feature_spec) if not spec.get("trainable", True)]
 
         if self.transfer_type is not None:
-            transfer_opts = ["direct", "difference", "contrastive"]
+            transfer_opts = ["direct", "contrastive"]
             if self.transfer_type not in transfer_opts:
                 raise ValueError(
                     f"Transfer type {self.transfer_type} not in available options: {transfer_opts}")
@@ -45,21 +45,18 @@ class MultiStageModelBuilder(GRUBuilder2):
 
     def num_outputs(self):
         """Multi-output model: primary output + secondary ANN output"""
-        nout = 3 if self.transfer_type in ["contrastive", "difference"] else 1
+        nout = 3 if self.transfer_type == "contrastive" else 1
         return nout
 
     def build_model(self, input_layers, input_data):
         base_model = self.load_existing_model()
-        if base_model:            
+        if base_model:
             if isinstance(base_model.input, list):
                 input_layer = {layer.name: layer for layer in base_model.input}
             else:
                 input_layer = base_model.input
-
             last_feat_name = self.feature_spec[-1].get("name", f"feature_{len(self.feature_spec)}")
             feature_extractor = base_model.get_layer(last_feat_name).output
-
-
             try:
                 self.old_dense_layer = base_model.get_layer("out_scaled")
                 self.old_weights = self.old_dense_layer.get_weights()
@@ -75,36 +72,30 @@ class MultiStageModelBuilder(GRUBuilder2):
             x = Concatenate(axis=-1, name="stacked")(expanded_inputs)
             feature_extractor = self._build_stack(x, self.feature_spec)
             input_layer = input_layers
-
         if self.transfer_type == "contrastive":
             out_target_layer = layers.Dense(units=len(self.output_names), activation="elu", name="target_scaled")
             out_source_layer = layers.Dense(units=len(self.output_names), activation="elu", name="source_scaled")
             out_target_scaled = out_target_layer(feature_extractor)
             out_source_scaled = out_source_layer(feature_extractor)
-            
             if self.old_weights is not None:
                 out_source_layer.set_weights(self.old_weights)
                 out_target_layer.set_weights(self.old_weights)
-
             output_scales = list(self.output_names.values())
             out_target_unscaled = UnscaleLayer(output_scales, name="out_target_unscaled")(out_target_scaled)
             out_source_unscaled = UnscaleLayer(output_scales, name="out_source_unscaled")(out_source_scaled)
             out_contrast_unscaled = layers.Subtract(name="out_contrast_unscaled")([out_target_unscaled, out_source_unscaled])
-            
-            ann = Model(inputs=input_layer, outputs={"out_target_unscaled": out_target_unscaled, "out_source_unscaled": out_source_unscaled, 
-            "out_contrast_unscaled": out_contrast_unscaled})
+            ann = Model(inputs=input_layer, outputs={"out_target_unscaled": out_target_unscaled, "out_source_unscaled": out_source_unscaled, "out_contrast_unscaled": out_contrast_unscaled})
             return ann
-
-         # ✅ Default Direct Mode
-        else:
-            scaled_output = layers.Dense(len(self.output_names), activation="elu", name="out_scaled")(feature_extractor)
-            unscaled_output = UnscaleLayer(list(self.output_names.values()), name="out_unscaled")(scaled_output)
-            model = Model(inputs=input_layer, outputs={"out_unscaled": unscaled_output})
-            return model
+        scaled_output = layers.Dense(len(self.output_names), activation="elu", name="out_scaled")(feature_extractor)
+        unscaled_output = UnscaleLayer(list(self.output_names.values()), name="out_unscaled")(scaled_output)
+        model = Model(inputs=input_layer, outputs={"out_unscaled": unscaled_output})
+        if self.old_weights is not None:
+            model.get_layer("out_scaled").set_weights(self.old_weights)
+        return model
 
     def requires_secondary_data(self):
         """Returns True if transfer learning requires a second dataset."""
-        requires_2nd = self.transfer_type in ["difference", "contrastive"]
+        requires_2nd = self.transfer_type == "contrastive"
         return requires_2nd
 
     def pool_and_align_cases(self, dataframes):
@@ -135,42 +126,27 @@ class MultiStageModelBuilder(GRUBuilder2):
             .sort_values(["case", "datetime"])
         )
 
-        # ✅ Step 2: Create aligned versions of each DataFrame
-        aligned_dfs = [
-            all_case_datetime.merge(df, on=["case", "datetime"], how="left")
-            for df in dataframes
-        ]
+        aligned = [all_case_datetime.merge(df, on=["case", "datetime"], how="left") for df in dataframes]
 
-        # ✅ Step 3: Identify input and output columns
         input_columns = list(self.input_names)
         output_columns = list(self.output_names)
 
-        # Step 4: Initialize merged_df with the first DataFrame to ensure all columns exist
-        merged_df = aligned_dfs[0].copy()
-
-        # Step 5: Iteratively update only input columns from all other DataFrames
-        for df in aligned_dfs[1:]:
+        merged_inputs = aligned[0][["case", "datetime"] + input_columns].copy()
+        for df in aligned[1:]:
             for col in input_columns:
-                if col in df.columns:  # Ensure column exists before updating
-                    merged_df[col] = merged_df[col].combine_first(df[col])
+                if col in df.columns:
+                    merged_inputs[col] = merged_inputs[col].combine_first(df[col])
 
-        # Step 6: Create final aligned DataFrames, ensuring original output values are preserved
-        final_dfs = []
-        for original_df in aligned_dfs:
-            df_final = merged_df.copy()[
-                ["datetime", "case", "model", "scene"] + input_columns + output_columns
-            ]
-            df_final["model"] = original_df.model
-            df_final["scene"] = original_df.scene
-            #  Preserve only the original output values for this DataFrame
+        final = []
+        for df in aligned:
+            out_df = merged_inputs.copy()
             for col in output_columns:
-
-                if col in original_df.columns:
-                    df_final[col] = original_df[
-                        col
-                    ]  # Restore the original output values
-            final_dfs.append(df_final)
-        return final_dfs
+                out_df[col] = df[col] if col in df.columns else np.nan
+            for extra in ["model", "scene"]:
+                if extra in df.columns and extra not in out_df.columns:
+                    out_df[extra] = df[extra]
+            final.append(out_df)
+        return final
 
     def fit_model(
         self,
