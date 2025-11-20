@@ -111,5 +111,77 @@ steps:
     save_modified_orig_model_fname: schism_base-suisun_gru2
     feature_layers:                    # dummy – grid‑search overwrites & freezes
       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
-      - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: true}
-      - {type: GRU, units: 12, name: lay3, trainable: true, return_sequences: false}
+      - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
+
+
+# # --------------------------------------------------------------
+# - name: base.slr
+#   input_prefix: schism_slr
+#   input_mask_regex: null
+#   output_prefix: "{output_dir}/schism_base.slr_gru2"
+#   save_model_fname: "{output_dir}/schism_base.slr_gru2"
+#   load_model_fname: "{output_dir}/dsm2.schism_base_gru2"
+#   pool_size: 12
+#   pool_aggregation: false
+#   target_fold_length: 180d
+#   init_train_rate: 0.001
+#   init_epochs: 10
+#   main_train_rate: 0.0005
+#   main_epochs: 36
+#   builder_args:
+#     source_data_prefix: schism_base
+#     source_input_mask_regex: [schism_base_2021.csv]
+#     transfer_type: contrastive
+#     contrast_weight: 0.5
+#     save_modified_orig_model_fname: schism_base-slr_gru2
+#     feature_layers:                    # dummy – grid‑search overwrites & freezes
+#       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+#       - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
+
+# # --------------------------------------------------------------
+# - name: base.cache
+#   input_prefix: schism_cache
+#   input_mask_regex: [schism_cache_2021\.csv]
+#   output_prefix: "{output_dir}/schism_base.cache_gru2"
+#   save_model_fname: "{output_dir}/schism_base.cache_gru2"
+#   load_model_fname: "{output_dir}/dsm2.schism_base_gru2"
+#   pool_size: 12
+#   pool_aggregation: false
+#   target_fold_length: 180d
+#   init_train_rate: 0.001
+#   init_epochs: 10
+#   main_train_rate: 0.0005
+#   main_epochs: 36
+#   builder_args:
+#     source_data_prefix: schism_base
+#     source_input_mask_regex: [schism_base_2021.csv]
+#     transfer_type: contrastive
+#     contrast_weight: 0.5
+#     save_modified_orig_model_fname: schism_base-cache_gru2
+#     feature_layers:                    # dummy – grid‑search overwrites & freezes
+#       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+#       - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
+
+# # --------------------------------------------------------------
+# - name: base.franks
+#   input_prefix: schism_franks
+#   input_mask_regex: [schism_franks_2021\.csv]
+#   output_prefix: "{output_dir}/schism_base.franks_gru2"
+#   save_model_fname: "{output_dir}/schism_base.franks_gru2"
+#   load_model_fname: "{output_dir}/dsm2.schism_base_gru2"
+#   pool_size: 12
+#   pool_aggregation: false
+#   target_fold_length: 180d
+#   init_train_rate: 0.001
+#   init_epochs: 10
+#   main_train_rate: 0.0005
+#   main_epochs: 36
+#   builder_args:
+#     source_data_prefix: schism_base
+#     source_input_mask_regex: [schism_base_2021.csv]
+#     transfer_type: contrastive
+#     contrast_weight: 0.5
+#     save_modified_orig_model_fname: schism_base-franks_gru2
+#     feature_layers:                    # dummy – grid‑search overwrites & freezes
+#       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+#       - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: true}

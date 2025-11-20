@@ -5,12 +5,13 @@ from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
 
-RUN_ID = "v1.2_MSTAGE"
+RUN_ID = "v2.1_MSTAGE_BSSN"
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"         
 OUTPUT_DIR.mkdir(exist_ok=True)
+
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
-CACHE = CacheManager(str(CACHE_DB))    
+CACHE = None #CacheManager(str(CACHE_DB))
 
 BASE_CONFIG_FILE = "transfer_config_multistage.yml"
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.suisun"]
@@ -25,22 +26,20 @@ HYPERPARAM_SPACE = {
 
     "feature_layers": [
         [ {"type":"GRU","units":32,"trainable":True,"name":"lay1", "return_sequences":True},
-          {"type":"GRU","units":16,"trainable":True,"name":"lay2", "return_sequences":True},
-          {"type":"GRU","units":12,"trainable":True,"name":"lay3", "return_sequences":False} ]],
+          {"type":"GRU","units":16,"trainable":True,"name":"lay2", "return_sequences":False}]],
 
     "freeze_schedule": [
         [0,0,0],
-        [0,0,1],
-        [0,1,1]],
+        [0,0,1]],
 
     "ndays":[105],
 
     "dsm2_init_lr":[0.008], "dsm2_main_lr":[0.001],
-    "dsm2_init_epochs":[10], "dsm2_main_epochs":[100],
+    "dsm2_init_epochs":[5], "dsm2_main_epochs":[10],
     "schism_init_lr":[0.003], "schism_main_lr":[0.001],
-    "schism_init_epochs":[10], "schism_main_epochs":[35],
+    "schism_init_epochs":[3], "schism_main_epochs":[7],
     "suisun_init_lr":[0.001], "suisun_main_lr":[0.0005],
-    "suisun_init_epochs":[10], "suisun_main_epochs":[35]}
+    "suisun_init_epochs":[3], "suisun_main_epochs":[7]}
 
 def compute_metrics(y_true, y_pred):
     mask = (~pd.isnull(y_true)) & (~pd.isnull(y_pred))
@@ -56,7 +55,7 @@ def compute_metrics(y_true, y_pred):
 def load_and_merge(model_name, trial_suffix):
     base_prefix = OUTPUT_PREFIXES[model_name]
     full_prefix = f"{base_prefix}_{trial_suffix}"
-    if model_name == "base.suisun-secondary":
+    if model_name.endswith("secondary"):
         ref_csv, ann_csv = (f"{full_prefix}_xvalid_ref_out_secondary_unscaled.csv", f"{full_prefix}_xvalid_1.csv")
     else:
         ref_csv, ann_csv = (f"{full_prefix}_xvalid_ref_out_unscaled.csv", f"{full_prefix}_xvalid_0.csv")
@@ -109,11 +108,13 @@ def evaluate_and_plot(trial_dir, hyperparams, trial_suffix):
     df_trial = pd.DataFrame(rows)
     df_trial["r2"] = df_trial["pearson_r"]**2
     df_trial.to_csv(Path(trial_dir)/"trial_evaluation_metrics.csv", index=False)
-    df_base = df_trial[df_trial["model"] == "base.suisun-secondary"]
-    df_suisun = df_trial[df_trial["model"] == "base.suisun"]
+    base_model = MODEL_NAMES[1] if len(MODEL_NAMES) > 1 else None
+    target_model = MODEL_NAMES[0] if len(MODEL_NAMES) > 0 else None
+    df_base = df_trial[df_trial["model"] == base_model] if base_model else pd.DataFrame()
+    df_target = df_trial[df_trial["model"] == target_model] if target_model else pd.DataFrame()
     return {
         "mean_nse_base" : round(df_base["nse"].mean(),4) if len(df_base) else np.nan,
-        "mean_nse_suisun" : round(df_suisun["nse"].mean(),4) if len(df_suisun) else np.nan,
+        "mean_nse_target" : round(df_target["nse"].mean(),4) if len(df_target) else np.nan,
         "mean_nse_overall": round(df_trial["nse"].mean(),4),
         "mean_r2" : round(df_trial["r2"].mean(),4)}
 
@@ -168,6 +169,8 @@ def main() -> None:
         dataset_key = _dataset_key_from_outputs(outputs_map)
 
         for step_idx, step in enumerate(mod_cfg["steps"]):
+            if step["name"] not in STEPS_TO_RUN:
+                continue
             orig_prefix = step["output_prefix"]
             run_prefix  = f"{orig_prefix}_{RUN_ID}"
             step_name   = f"{run_prefix}_{trial_name}"
@@ -224,18 +227,7 @@ def main() -> None:
             abs_model_path  = str(Path(step["save_model_fname"]).resolve())
             abs_prefix_path = str(Path(step["output_prefix"]).resolve())
 
-            print(f"INFO  | {trial_name} | {step['name']} | querying cache …")
-            hit, info = CACHE.check(step["name"], recipe,
-                                    abs_model_path, abs_prefix_path,
-                                    parent_hash)
-            if hit:
-                print(f"INFO  | {trial_name} | {step['name']} | cache HIT  ➜ SKIP")
-                if not Path(f"{abs_model_path}.h5").exists():
-                    raise RuntimeError(f"Cache hit but .h5 missing for {step['name']}")
-                parent_hash = info
-                continue
-
-            print(f"INFO  | {trial_name} | {step['name']} | cache MISS ➜ TRAIN")
+            print(f"INFO  | {trial_name} | {step['name']} | caching disabled ➜ TRAIN")
             tmp_yaml = SCRIPT_DIR / f"tmp_{trial_name}_{step['name']}.yml"
             save_yml({"output_dir": str(OUTPUT_DIR), "model_builder_config": mod_cfg["model_builder_config"], "steps": [step]}, tmp_yaml)
 
@@ -248,9 +240,7 @@ def main() -> None:
             finally:
                 tmp_yaml.unlink(missing_ok=True)
 
-            key_hash, finalize = info
-            finalize()                
-            parent_hash = key_hash     
+            parent_hash = None    
 
         trial_dir = SCRIPT_DIR / f"{RUN_ID}_{trial_name}_results"
         trial_dir.mkdir(exist_ok=True)

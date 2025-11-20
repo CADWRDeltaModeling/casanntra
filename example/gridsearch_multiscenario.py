@@ -4,8 +4,7 @@ import yaml, numpy as np, pandas as pd, matplotlib.pyplot as plt
 from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
-
-RUN_ID = "MSCEN_v1.4_MULTI_SCEN_BRANCH"
+RUN_ID = "MSCEN_v2.1_BSSN"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 if SCRIPT_DIR.name.lower() == "example":
@@ -17,7 +16,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
 CACHE = CacheManager(str(CACHE_DB))
 
-BASE_CONFIG_FILE = (SCRIPT_DIR / "transfer_config_multiscenario.yaml").as_posix()
+BASE_CONFIG_FILE = (SCRIPT_DIR / "transfer_config_multiscenario.yml").as_posix()
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.multi"]
 MASTER_SUMMARY = (SCRIPT_DIR / f"gridsearch_{RUN_ID}_master_results.csv").as_posix()
 
@@ -28,21 +27,23 @@ HYPERPARAM_SPACE = {
         [{"type": "GRU",  "units": 32, "return_sequences": True, "name": "lay1", "trainable": True},
          {"type": "GRU",  "units": 16, "return_sequences": False, "name": "lay2", "trainable": True}]],
 
-    "freeze_schedule": [[0, 0, 0], [0, 0, 1], [0, 1, 1]],
+    "freeze_schedule": [[0, 0, 0], [0, 0, 1]],
+    
     "ndays": [105],
     "dsm2_init_lr": [0.008], "dsm2_main_lr": [0.001],
-    "dsm2_init_epochs": [10], "dsm2_main_epochs": [100],
+    "dsm2_init_epochs": [5], "dsm2_main_epochs": [10],
     "schism_init_lr": [0.003], "schism_main_lr": [0.001],
-    "schism_init_epochs": [10], "schism_main_epochs": [35],
+    "schism_init_epochs": [3], "schism_main_epochs": [7],
     "multi_init_lr": [0.001],          
     "multi_main_lr": [0.0005],    
-    "multi_init_epochs": [10],
-    "multi_main_epochs": [35],
+    "multi_init_epochs": [3],
+    "multi_main_epochs": [7],
     "source_weight": [1.0],
     "target_weight": [1.0],
-    "contrast_weight": [0.5],
-    "per_scenario_branch": [True],
-    "branch_layers": [[{"type": "GRU", "units": 16, "return_sequences": False, "name": "branch_3", "trainable": True}]]}
+    "contrast_weight": [1.0],
+
+    "per_scenario_branch": [False],
+    "branch_layers": [[]]}
 
 def compute_metrics(y_true, y_pred):
     mask = (~pd.isnull(y_true)) & (~pd.isnull(y_pred))
