@@ -5,13 +5,14 @@ from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
 
-RUN_ID = "v2.1_MSTAGE_BSSN"
+RUN_ID = "v2.1_MSTAGE_DEBUG"
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"         
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
 CACHE = None #CacheManager(str(CACHE_DB))
+DEBUG_EVAL = True  # write per-step mean NSE into debug_runs
 
 BASE_CONFIG_FILE = "transfer_config_multistage.yml"
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.suisun"]
@@ -149,6 +150,106 @@ def _dataset_key_from_outputs(outputs: dict) -> str:
         sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
+
+def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, trial_name: str):
+    """Compute mean NSE per head for a single step and write to debug_runs."""
+    if not DEBUG_EVAL:
+        return
+
+    debug_dir = Path(SCRIPT_DIR) / "debug_runs" / f"{RUN_ID}_{trial_name}"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    out_path = debug_dir / f"{step_name}_mean_nse.csv"
+    rows = []
+
+    def _merge_pair(ref_path: Path, pred_path: Path):
+        """Read ref/pred CSVs, coerce datetime/case, merge on (case, datetime)."""
+        if not ref_path.exists() or not pred_path.exists():
+            return None
+        df_ref = pd.read_csv(ref_path, parse_dates=["datetime"])
+        df_pred = pd.read_csv(pred_path, parse_dates=["datetime"])
+
+        if "case" in df_ref.columns:
+            df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
+        if "case" in df_pred.columns:
+            df_pred["case"] = pd.to_numeric(df_pred["case"], errors="coerce")
+
+        merged = pd.merge(df_ref, df_pred, on=["datetime", "case"], suffixes=("", "_pred"))
+        merged = merged.sort_values(["case", "datetime"]).reset_index(drop=True)
+        return merged if not merged.empty else None
+
+    # ---------- direct steps: single head ----------
+    if transfer_type in (None, "None", "direct"):
+        merged = _merge_pair(
+            Path(f"{step_prefix}_xvalid_ref_out_unscaled.csv"),
+            Path(f"{step_prefix}_xvalid.csv"),
+        )
+        if merged is not None:
+            stations = [
+                c for c in merged.columns
+                if c not in {"datetime", "case", "fold"}
+                and not c.endswith("_pred")
+                and f"{c}_pred" in merged
+            ]
+            nses = []
+            for st in stations:
+                met = compute_metrics(merged[st], merged[f"{st}_pred"])
+                nses.append(met["nse"])
+            if nses:
+                rows.append({
+                    "head": "base",
+                    "mean_nse": round(float(np.nanmean(nses)), 4),
+                })
+
+    # ---------- contrastive steps: target + base heads ----------
+    else:
+        # target head (xvalid_0)
+        merged_t = _merge_pair(
+            Path(f"{step_prefix}_xvalid_ref_out_unscaled.csv"),
+            Path(f"{step_prefix}_xvalid_0.csv"),
+        )
+        if merged_t is not None:
+            stations = [
+                c for c in merged_t.columns
+                if c not in {"datetime", "case", "fold"}
+                and not c.endswith("_pred")
+                and f"{c}_pred" in merged_t
+            ]
+            nses = []
+            for st in stations:
+                met = compute_metrics(merged_t[st], merged_t[f"{st}_pred"])
+                nses.append(met["nse"])
+            if nses:
+                rows.append({
+                    "head": "target",
+                    "mean_nse": round(float(np.nanmean(nses)), 4),
+                })
+
+        # base head (secondary)
+        merged_b = _merge_pair(
+            Path(f"{step_prefix}_xvalid_ref_out_secondary_unscaled.csv"),
+            Path(f"{step_prefix}_xvalid_1.csv"),
+        )
+        if merged_b is not None:
+            stations = [
+                c for c in merged_b.columns
+                if c not in {"datetime", "case", "fold"}
+                and not c.endswith("_pred")
+                and f"{c}_pred" in merged_b
+            ]
+            nses = []
+            for st in stations:
+                met = compute_metrics(merged_b[st], merged_b[f"{st}_pred"])
+                nses.append(met["nse"])
+            if nses:
+                rows.append({
+                    "head": "base",
+                    "mean_nse": round(float(np.nanmean(nses)), 4),
+                })
+
+    if rows:
+        pd.DataFrame(rows).to_csv(out_path, index=False)
+        print(f"[debug] wrote step metrics -> {out_path}")
+
 def main() -> None:
     Path(MASTER_SUMMARY).unlink(missing_ok=True)
 
@@ -239,6 +340,12 @@ def main() -> None:
                 break
             finally:
                 tmp_yaml.unlink(missing_ok=True)
+
+            if DEBUG_EVAL:
+                _eval_step_mean_nse(step_name=step["name"],
+                                    transfer_type=_canon_transfer(step["builder_args"].get("transfer_type")),
+                                    step_prefix=step["output_prefix"],
+                                    trial_name=trial_name)
 
             parent_hash = None    
 

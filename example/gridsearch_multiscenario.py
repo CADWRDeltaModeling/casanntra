@@ -4,7 +4,7 @@ import yaml, numpy as np, pandas as pd, matplotlib.pyplot as plt
 from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
-RUN_ID = "MSCEN_v2.1_BSSN"
+RUN_ID = "MSCEN_v2.1_DEBUG"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 if SCRIPT_DIR.name.lower() == "example":
@@ -14,7 +14,8 @@ else:
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CACHE_DB = OUTPUT_DIR / "run_cache.sqlite"
-CACHE = CacheManager(str(CACHE_DB))
+CACHE = None  
+DEBUG_EVAL = True  
 
 BASE_CONFIG_FILE = (SCRIPT_DIR / "transfer_config_multiscenario.yml").as_posix()
 STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.multi"]
@@ -196,6 +197,42 @@ def _scenarios_fingerprint(scenarios: list, source_data_prefix: str, source_mask
     canonical = json.dumps(skinny, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()
 
+
+def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, tags: list, trial_name: str):
+    """Compute mean NSE per tag for a single step and write to debug_runs."""
+    if not DEBUG_EVAL:
+        return
+    debug_dir = Path(SCRIPT_DIR) / "debug_runs" / f"{RUN_ID}_{trial_name}"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    out_path = debug_dir / f"{step_name}_mean_nse.csv"
+    rows = []
+
+    for tag in tags:
+        df = None
+        try:
+            df = load_and_merge_ms(step_prefix, tag)
+        except FileNotFoundError:
+            ref = Path(f"{step_prefix}_xvalid_ref_out_unscaled.csv")
+            pred = Path(f"{step_prefix}_xvalid.csv")
+            if ref.exists() and pred.exists():
+                df_ref = pd.read_csv(ref, parse_dates=["datetime"])
+                df_pred = pd.read_csv(pred, parse_dates=["datetime"])
+                df = pd.merge(df_ref, df_pred, on=["datetime", "case"], suffixes=("", "_pred"))
+        if df is None:
+            continue
+        nses = []
+        for st in STATIONS:
+            if st not in df.columns or f"{st}_pred" not in df.columns:
+                continue
+            met = compute_metrics(df[st], df[f"{st}_pred"])
+            nses.append(met["nse"])
+        if nses:
+            rows.append({"tag": tag, "mean_nse": round(np.nanmean(nses), 4)})
+
+    if rows:
+        pd.DataFrame(rows).to_csv(out_path, index=False)
+        print(f"[debug] wrote step metrics -> {out_path}")
+
 def main() -> None:
     
     Path(MASTER_SUMMARY).unlink(missing_ok=True)
@@ -267,7 +304,6 @@ def main() -> None:
                             main_epochs = combo["multi_main_epochs"])
 
             trunk_template = copy.deepcopy(combo["trunk_layers"])
-            # Ensure the final GRU before the heads collapses time for both direct and contrastive steps
             if trunk_template:
                 trunk_template[-1]["return_sequences"] = False
             base_template = copy.deepcopy(trunk_template)
@@ -311,9 +347,10 @@ def main() -> None:
             abs_model_path = str(Path(step["save_model_fname"]).resolve())
             abs_prefix_path = str(Path(step["output_prefix"]).resolve())
 
-            print(f"{trial_name} | {step['name']}: querying cache")
-            hit, info = CACHE.check(step["name"], recipe, abs_model_path, abs_prefix_path, parent_hash)
-
+            hit = False; info = (None, None)
+            if CACHE is not None:
+                print(f"{trial_name} | {step['name']}: querying cache")
+                hit, info = CACHE.check(step["name"], recipe, abs_model_path, abs_prefix_path, parent_hash)
             if hit:
                 print(f"{trial_name} | {step['name']}: cache HIT: SKIP")
                 parent_hash = info
@@ -334,9 +371,15 @@ def main() -> None:
             finally:
                 tmp_yaml.unlink(missing_ok=True)
 
-            key_hash, finalize = info
-            finalize()
-            parent_hash = key_hash
+            if DEBUG_EVAL:
+                step_tags = tags_for_eval if step["name"] == "base.multi" else ["base"]
+                _eval_step_mean_nse(step_name=step["name"],
+                                    transfer_type=transfer_type,
+                                    step_prefix=step["output_prefix"],
+                                    tags=step_tags,
+                                    trial_name=trial_name)
+
+            parent_hash = None
 
         if multi_prefix_for_eval is None:
             print("Multi-scenario prefix not captured; skip evaluation for this trial.")
