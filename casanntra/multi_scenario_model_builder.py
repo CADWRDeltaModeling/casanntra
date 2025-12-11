@@ -332,7 +332,7 @@ class MultiScenarioModelBuilder(ModelBuilder):
         prev = self._load_previous_model()
         if prev is not None:
             self._init_all_weights(prev, ann)
-            self._copy_preprocessing_layers(prev, ann)
+            self._copy_preprocessing_layers(prev, ann) 
 
         self._apply_trainable_flags(ann)
 
