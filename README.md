@@ -1279,3 +1279,12 @@ This project was funded by the **Delta Stewardship Council** through the Delta S
 - Transfer learning bridges this gap by leveraging extensive DSM2 training data
 
 The framework enables CalSim operations modeling to incorporate scenario-specific salinity responses, supporting water resource planning decisions that balance urban/agricultural supply, environmental flows, and regulatory compliance.
+
+---
+
+## Contact
+
+For questions about this project:
+
+- **Can Ruso** - canruso@berkeley.edu
+- **Eli Ateljevich** - Eli.Ateljevich@water.ca.gov
