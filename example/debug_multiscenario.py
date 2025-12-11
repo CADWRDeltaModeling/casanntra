@@ -10,7 +10,6 @@ OUTPUT_DIR = "./debug_output/multiscenario"
 if os.path.exists(OUTPUT_DIR): shutil.rmtree(OUTPUT_DIR)
 os.makedirs(OUTPUT_DIR)
 
-# --- WRAPPERS ---
 class DebugScaledMaskedMAE(ScaledMaskedMAE):
     def __init__(self, output_scales, name="scaled_mae", **kwargs):
         kwargs.pop('reduction', None)
@@ -20,12 +19,10 @@ class DebugScaledMaskedMSE(ScaledMaskedMSE):
     def __init__(self, output_scales, name="scaled_mse", **kwargs):
         kwargs.pop('reduction', None)
         super().__init__(output_scales, name=name)
-# ----------------
 
 def run_step(step_name, transfer_type, load_fname, trunk_layers, scenarios_cfg=None):
     print(f"\n>> STEP: {step_name}")
-    
-    # 1. Setup
+
     set_global_seeds(100) 
     builder = MultiScenarioModelBuilder(INPUT_NAMES, OUTPUT_NAMES, ndays=NDAYS)
     builder.custom_objects["ScaledMaskedMAE"] = DebugScaledMaskedMAE
@@ -40,12 +37,8 @@ def run_step(step_name, transfer_type, load_fname, trunk_layers, scenarios_cfg=N
         "per_scenario_branch": False,
         "branch_layers": [],
         "include_source_branch": False,
-        "scenarios": scenarios_cfg or []
-    })
+        "scenarios": scenarios_cfg or []})
     builder.load_model_fname = load_fname
-    
-    # 2. Data Generation
-    # STRICT PRODUCTION PARITY: Seed 200 = Base, Seed 201 = Target
     
     if scenarios_cfg:
         set_global_seeds(200)
@@ -69,17 +62,11 @@ def run_step(step_name, transfer_type, load_fname, trunk_layers, scenarios_cfg=N
         df_in_list.append(i)
         df_out_list.append(o)
         
-    # staged_learning logic: df_in = df_base_in (Index 0)
     df_in = df_in_list[0].iloc[:100]
-    
-    # Output Order: [Base, Target] (MultiScenario convention)
     df_out = [d.iloc[:100] for d in df_out_list]
     if len(df_out) == 1: df_out = df_out[0]
-
-    # Adaptation Data: build_model uses df_in (Base) because that's what xvalid passes
     df_adapt = df_base.iloc[:50]
 
-    # 3. Build
     set_global_seeds(300)
     input_layers = builder.input_layers()
     model = builder.build_model(input_layers, df_adapt)
@@ -88,9 +75,8 @@ def run_step(step_name, transfer_type, load_fname, trunk_layers, scenarios_cfg=N
         sid = scenarios_cfg[0]['id']
         assert_heads_match(model, "head_base_scaled", f"head_{sid}_scaled")
     
-    # 4. Fit
     set_global_seeds(400)
-    print(f"   Training {step_name}...")
+    print(f"Training {step_name}...")
     
     inputs_lagged = builder.calc_antecedent_preserve_cases(df_in)
     if isinstance(df_out, list):

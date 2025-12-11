@@ -10,7 +10,6 @@ OUTPUT_DIR = "./debug_output/multistage"
 if os.path.exists(OUTPUT_DIR): shutil.rmtree(OUTPUT_DIR)
 os.makedirs(OUTPUT_DIR)
 
-# --- WRAPPERS ---
 class DebugScaledMaskedMAE(ScaledMaskedMAE):
     def __init__(self, output_scales, name="scaled_mae", **kwargs):
         kwargs.pop('reduction', None)
@@ -20,12 +19,10 @@ class DebugScaledMaskedMSE(ScaledMaskedMSE):
     def __init__(self, output_scales, name="scaled_mse", **kwargs):
         kwargs.pop('reduction', None)
         super().__init__(output_scales, name=name)
-# ----------------
 
 def run_step(step_name, transfer_type, load_fname, feature_layers, contrast_weight=None):
     print(f"\n>> STEP: {step_name}")
     
-    # 1. Setup
     set_global_seeds(100) 
     builder = MultiStageModelBuilder(INPUT_NAMES, OUTPUT_NAMES, ndays=NDAYS)
     builder.custom_objects["ScaledMaskedMAE"] = DebugScaledMaskedMAE
@@ -34,35 +31,24 @@ def run_step(step_name, transfer_type, load_fname, feature_layers, contrast_weig
     builder.set_builder_args({
         "transfer_type": transfer_type,
         "feature_layers": feature_layers,
-        "contrast_weight": contrast_weight
-    })
+        "contrast_weight": contrast_weight})
     builder.load_model_fname = load_fname
     
-    # 2. Data Generation
-    # STRICT PRODUCTION PARITY: Seed 200 = Base, Seed 201 = Target
-    
+
     if transfer_type == "contrastive":
         set_global_seeds(200)
-        df_base = make_synthetic_data(INPUT_NAMES, OUTPUT_NAMES) # Seed 200 (Base)
+        df_base = make_synthetic_data(INPUT_NAMES, OUTPUT_NAMES) 
         
         set_global_seeds(201)
-        df_target = make_synthetic_data(INPUT_NAMES, OUTPUT_NAMES) # Seed 201 (Target)
+        df_target = make_synthetic_data(INPUT_NAMES, OUTPUT_NAMES) 
 
-        # Manual Alignment mimicking staged_learning
-        # staged_learning.py: df_source_in ... df_in (Target). THEN df_in = df_source_in
-        
         df_in_base, df_out_base = builder.xvalid_time_folds(df_base, target_fold_len='5d', split_in_out=True)
         _, df_out_target = builder.xvalid_time_folds(df_target, target_fold_len='5d', split_in_out=True)
-        
-        # PRODUCTION LOGIC: Input is Base. Output is [Target, Base].
         df_in = df_in_base.iloc[:100]
         df_out = [df_out_target.iloc[:100], df_out_base.iloc[:100]]
-        
-        # Adaptation Data: build_model uses df_in (Base)
         df_adapt = df_base.iloc[:50]
         
     else:
-        # Direct/Pretrain uses Base (Seed 200)
         set_global_seeds(200)
         df_base = make_synthetic_data(INPUT_NAMES, OUTPUT_NAMES)
         df_in, df_out = builder.xvalid_time_folds(df_base, target_fold_len='5d', split_in_out=True)
@@ -70,7 +56,6 @@ def run_step(step_name, transfer_type, load_fname, feature_layers, contrast_weig
         df_out = df_out.iloc[:100]
         df_adapt = df_base.iloc[:50]
 
-    # 3. Build
     set_global_seeds(300)
     input_layers = builder.input_layers()
     model = builder.build_model(input_layers, df_adapt)
@@ -78,9 +63,8 @@ def run_step(step_name, transfer_type, load_fname, feature_layers, contrast_weig
     if transfer_type == "contrastive":
         assert_heads_match(model, "target_scaled", "source_scaled")
 
-    # 4. Fit
     set_global_seeds(400)
-    print(f"   Training {step_name}...")
+    print(f"Training {step_name}...")
     
     inputs_lagged = builder.calc_antecedent_preserve_cases(df_in)
     if isinstance(df_out, list):

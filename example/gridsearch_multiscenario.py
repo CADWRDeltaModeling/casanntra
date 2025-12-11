@@ -4,7 +4,8 @@ import yaml, numpy as np, pandas as pd, matplotlib.pyplot as plt
 from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
-RUN_ID = "MSCEN_v2.1_DEBUG"
+# OLD: RUN_ID = "MSCEN_v3.1_DEBUG"
+RUN_ID = "MSCEN_v4.1"
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 if SCRIPT_DIR.name.lower() == "example":
@@ -25,23 +26,25 @@ STATIONS = ["cse","bdl","rsl","emm2","jer","sal","frk","bac","oh4", "x2","mal","
 
 HYPERPARAM_SPACE = {
     "trunk_layers": [
-        [{"type": "GRU",  "units": 32, "return_sequences": True, "name": "lay1", "trainable": True},
+        [{"type": "GRU",  "units": 38, "return_sequences": True, "name": "lay1", "trainable": True},
+         {"type": "GRU",  "units": 19, "return_sequences": False, "name": "lay2", "trainable": True}],
+         [{"type": "GRU",  "units": 32, "return_sequences": True, "name": "lay1", "trainable": True},
          {"type": "GRU",  "units": 16, "return_sequences": False, "name": "lay2", "trainable": True}]],
 
-    "freeze_schedule": [[0, 0, 0], [0, 0, 1]],
+    "freeze_schedule": [[0, 0, 0], [0, 0, 1], [0, 0, 2]],
     
-    "ndays": [105],
+    "ndays": [90, 105, 120],
     "dsm2_init_lr": [0.008], "dsm2_main_lr": [0.001],
-    "dsm2_init_epochs": [5], "dsm2_main_epochs": [10],
+    "dsm2_init_epochs": [10], "dsm2_main_epochs": [35],
     "schism_init_lr": [0.003], "schism_main_lr": [0.001],
-    "schism_init_epochs": [3], "schism_main_epochs": [7],
+    "schism_init_epochs": [10], "schism_main_epochs": [35],
     "multi_init_lr": [0.001],          
     "multi_main_lr": [0.0005],    
-    "multi_init_epochs": [3],
-    "multi_main_epochs": [7],
+    "multi_init_epochs": [10],
+    "multi_main_epochs": [35],
     "source_weight": [1.0],
     "target_weight": [1.0],
-    "contrast_weight": [1.0],
+    "contrast_weight": [0.5, 1.0],
 
     "per_scenario_branch": [False],
     "branch_layers": [[]]}
@@ -72,8 +75,9 @@ def load_and_merge_ms(prefix: str, tag: str):
     df_ref = pd.read_csv(ref_csv, parse_dates=["datetime"])
     df_ann = pd.read_csv(ann_csv, parse_dates=["datetime"])
 
-    df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
-    df_ann["case"] = pd.to_numeric(df_ann["case"], errors="coerce")
+    # OLD: Coercing to numeric causes NaN cross-joins with mixed string/numeric cases
+    # df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
+    # df_ann["case"] = pd.to_numeric(df_ann["case"], errors="coerce")
     df_ref["datetime"] = pd.to_datetime(df_ref["datetime"], errors="coerce")
     df_ann["datetime"] = pd.to_datetime(df_ann["datetime"], errors="coerce")
 

@@ -4,8 +4,8 @@ import yaml, numpy as np, pandas as pd, matplotlib.pyplot as plt
 from casanntra.staged_learning import process_config
 from cache_manager import CacheManager
 
-
-RUN_ID = "v2.1_MSTAGE_DEBUG"
+# OLD: RUN_ID = "v3.1_MSTAGE_DEBUG"
+RUN_ID = "v4.1_MSTAGE"
 SCRIPT_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SCRIPT_DIR / "output"         
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -23,24 +23,27 @@ ABS_PREFIX = (OUTPUT_DIR / f"schism_base.suisun_gru2_{RUN_ID}").resolve()
 OUTPUT_PREFIXES = {"base.suisun" : str(ABS_PREFIX), "base.suisun-secondary": str(ABS_PREFIX)}
 
 HYPERPARAM_SPACE = {
-    "contrast_weight": [1.0],
+    "contrast_weight": [0.5, 1.0],
 
     "feature_layers": [
         [ {"type":"GRU","units":32,"trainable":True,"name":"lay1", "return_sequences":True},
-          {"type":"GRU","units":16,"trainable":True,"name":"lay2", "return_sequences":False}]],
+          {"type":"GRU","units":16,"trainable":True,"name":"lay2", "return_sequences":False}],
+          [ {"type":"GRU","units":38,"trainable":True,"name":"lay1", "return_sequences":True},
+          {"type":"GRU","units":19,"trainable":True,"name":"lay2", "return_sequences":False}]],
 
     "freeze_schedule": [
         [0,0,0],
-        [0,0,1]],
+        [0,0,1],
+        [0,0,2]],
 
-    "ndays":[105],
+    "ndays":[90, 105, 120],
 
     "dsm2_init_lr":[0.008], "dsm2_main_lr":[0.001],
-    "dsm2_init_epochs":[5], "dsm2_main_epochs":[10],
+    "dsm2_init_epochs":[10], "dsm2_main_epochs":[35],
     "schism_init_lr":[0.003], "schism_main_lr":[0.001],
-    "schism_init_epochs":[3], "schism_main_epochs":[7],
+    "schism_init_epochs":[10], "schism_main_epochs":[35],
     "suisun_init_lr":[0.001], "suisun_main_lr":[0.0005],
-    "suisun_init_epochs":[3], "suisun_main_epochs":[7]}
+    "suisun_init_epochs":[10], "suisun_main_epochs":[35]}
 
 def compute_metrics(y_true, y_pred):
     mask = (~pd.isnull(y_true)) & (~pd.isnull(y_pred))
@@ -65,6 +68,11 @@ def load_and_merge(model_name, trial_suffix):
         raise FileNotFoundError(ref_csv + " / " + ann_csv)
     df_ref = pd.read_csv(ref_csv, parse_dates=["datetime"])
     df_ann = pd.read_csv(ann_csv, parse_dates=["datetime"])
+    # OLD: Coercing to numeric causes NaN cross-joins with mixed string/numeric cases
+    # if "case" in df_ref.columns:
+    #     df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
+    # if "case" in df_ann.columns:
+    #     df_ann["case"] = pd.to_numeric(df_ann["case"], errors="coerce")
     return pd.merge(df_ref, df_ann, on=["datetime","case"], suffixes=("", "_pred"))
 
 def plot_timeseries_all_cases(df, station, model_name, out_dir, n_cases=7):
@@ -152,7 +160,11 @@ def _dataset_key_from_outputs(outputs: dict) -> str:
 
 
 def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, trial_name: str):
-    """Compute mean NSE per head for a single step and write to debug_runs."""
+    """Compute mean NSE per head for a single step and write to debug_runs.
+
+    Uses the station list from the YAML (STATIONS) and ignores any unnamed/index columns,
+    matching the MSCEN behaviour.
+    """
     if not DEBUG_EVAL:
         return
 
@@ -162,16 +174,17 @@ def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, tr
     rows = []
 
     def _merge_pair(ref_path: Path, pred_path: Path):
-        """Read ref/pred CSVs, coerce datetime/case, merge on (case, datetime)."""
+        """Read ref/pred CSVs, merge on (case, datetime)."""
         if not ref_path.exists() or not pred_path.exists():
             return None
         df_ref = pd.read_csv(ref_path, parse_dates=["datetime"])
         df_pred = pd.read_csv(pred_path, parse_dates=["datetime"])
 
-        if "case" in df_ref.columns:
-            df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
-        if "case" in df_pred.columns:
-            df_pred["case"] = pd.to_numeric(df_pred["case"], errors="coerce")
+        # OLD: Coercing to numeric causes NaN cross-joins with mixed string/numeric cases
+        # if "case" in df_ref.columns:
+        #     df_ref["case"] = pd.to_numeric(df_ref["case"], errors="coerce")
+        # if "case" in df_pred.columns:
+        #     df_pred["case"] = pd.to_numeric(df_pred["case"], errors="coerce")
 
         merged = pd.merge(df_ref, df_pred, on=["datetime", "case"], suffixes=("", "_pred"))
         merged = merged.sort_values(["case", "datetime"]).reset_index(drop=True)
@@ -184,12 +197,7 @@ def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, tr
             Path(f"{step_prefix}_xvalid.csv"),
         )
         if merged is not None:
-            stations = [
-                c for c in merged.columns
-                if c not in {"datetime", "case", "fold"}
-                and not c.endswith("_pred")
-                and f"{c}_pred" in merged
-            ]
+            stations = [c for c in STATIONS if c in merged.columns and f"{c}_pred" in merged.columns]
             nses = []
             for st in stations:
                 met = compute_metrics(merged[st], merged[f"{st}_pred"])
@@ -208,12 +216,7 @@ def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, tr
             Path(f"{step_prefix}_xvalid_0.csv"),
         )
         if merged_t is not None:
-            stations = [
-                c for c in merged_t.columns
-                if c not in {"datetime", "case", "fold"}
-                and not c.endswith("_pred")
-                and f"{c}_pred" in merged_t
-            ]
+            stations = [c for c in STATIONS if c in merged_t.columns and f"{c}_pred" in merged_t.columns]
             nses = []
             for st in stations:
                 met = compute_metrics(merged_t[st], merged_t[f"{st}_pred"])
@@ -230,12 +233,7 @@ def _eval_step_mean_nse(step_name: str, transfer_type: str, step_prefix: str, tr
             Path(f"{step_prefix}_xvalid_1.csv"),
         )
         if merged_b is not None:
-            stations = [
-                c for c in merged_b.columns
-                if c not in {"datetime", "case", "fold"}
-                and not c.endswith("_pred")
-                and f"{c}_pred" in merged_b
-            ]
+            stations = [c for c in STATIONS if c in merged_b.columns and f"{c}_pred" in merged_b.columns]
             nses = []
             for st in stations:
                 met = compute_metrics(merged_b[st], merged_b[f"{st}_pred"])

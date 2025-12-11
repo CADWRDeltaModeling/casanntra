@@ -20,7 +20,7 @@ model_builder_config:
       - smscg
     output_names:          
       x2: 100.0
-      mrz: 30000.0
+      # mrz: 30000.0
       pct: 20000.0
       mal: 15000.0
       gzl: 20000.0
@@ -33,11 +33,11 @@ model_builder_config:
       jer: 3000.0
       sal: 1200.0
       frk: 2500.0
-      srv: 1200.0
+      # srv: 1200.0
       bac: 1500.0
       rsl: 1500.0
       oh4: 1200.0
-      wci: 1200.0
+      # wci: 1200.0
       trp: 1200.0
     ndays: 90           
 

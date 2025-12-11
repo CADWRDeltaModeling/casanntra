@@ -1,11 +1,9 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
-Stage‑level cache manager for the hydrodynamic‑ANN pipeline.
+Stage-level cache manager for the hydrodynamic-ANN pipeline.
 
 * One SQLite DB (`output/run_cache.sqlite`) stores:
-    key‑hash  →  model.h5  +  x‑validation CSV prefix
-* Collision probability is negligible (SHA‑256 of full recipe).
+    key-hash  →  model.h5  +  x-validation CSV prefix
+* Collision probability is negligible (SHA-256 of full recipe).
 """
 
 import json, hashlib, sqlite3, datetime as dt, shutil, glob
