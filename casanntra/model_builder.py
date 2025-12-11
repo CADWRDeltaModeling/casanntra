@@ -144,7 +144,12 @@ class ModelBuilder(object):
         """Base class for model builders, now handling custom object registration."""
         self.input_names = input_names
         self.output_names = output_names  # Dict of {output_name: scale_factor}
+        # time/lag configuration defaults used by downstream utilities
         self.ndays = ndays
+        self.ntime = ndays               # synonym used in some builders
+        self.nwindows = 0                # no aggregated windows by default
+        self.window_length = 0           # window duration (unused when nwindows==0)
+        self.reverse_time_inputs = False # forward chronological order for RNNs
         self.load_model_fname = None  # Used for transfer learning
         self.builder_args = {}        # Used for per-step configuration See process_config
         self.ann_output_name = 'output_scaled'  # default for single output
