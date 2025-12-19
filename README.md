@@ -67,42 +67,12 @@ Casanntra implements multiple flavors of **transfer learning**, enabling surroga
 - Both models are revised simultaneously, balancing error across their respective objectives.
 - This method ensures that shared structures between models are reinforced while allowing each model to refine its domain-specific details.
 
+### Difference-Based Transfer Learning
+- Focuses on adjusting the target model without modifying the source model.
+- Optimizes the surrogate model not only for the target scenario but also for accurately representing the differences between the source and target cases.
+- This approach is still under development and not fully implemented.
+
 Each of these methods applies a combination of **"freezing" and restarting with low learning rates** to control model updates effectively. As part of this abstraction, each step in the training sequence consists of an **initial phase** and a **main phase**, ensuring stability and gradual adaptation to the new data.
-
-### Multi-Scenario Contrastive Architecture
-The multi-scenario pipeline trains a single model that serves the base case and any number of scenario cases simultaneously. It preserves the single-scenario interface—supplying only one scenario in the YAML reduces to the single-scenario path—while adding the ability to learn scenario deltas in one pass.
-
-Structure:
-- **Shared trunk:** two stacked GRUs (`trunk_layers`), with the final GRU (`lay2`) set `return_sequences: false` so all heads see a time-collapsed feature vector. Freeze schedules apply to these layers exactly as in the staged/single-scenario runs.
-- **Head-specific branches (optional):** enabling `per_scenario_branch: true` and defining `branch_layers` inserts a small head-specific GRU—functionally the third GRU in the architecture (e.g., `branch_3` with `return_sequences: false`). `include_source_branch: true` applies the same adapter to the base head so base and scenarios start from identical shapes before diverging.
-- **Heads and contrasts:** each head produces unscaled outputs for its scenario. Contrast heads subtract scenario outputs from the base head, letting the loss focus on scenario deltas without changing the base target definition.
-- **Data setup:** scenarios live under `builder_args.scenarios`, each with an `id` and `input_prefix`. Input order is aligned once, preprocessing layers are copied from prior stages, and weights are reused where layer names match.
-- **Losses:** masked, scaled MAE/MSE are applied per head and per contrast output, using the same scaling factors as the single-scenario pipeline.
-
-
-**Example parity settings (single or many) - yaml**
-- builder_args:
-  transfer_type: contrastive
-  trunk_layers:
-    - {type: GRU, units: 32, name: lay1, return_sequences: true,  trainable: false}
-    - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: false}
-  per_scenario_branch: true
-  branch_layers:
-    - {type: GRU, units: 16, name: branch_3, return_sequences: false, trainable: true}
-  include_source_branch: true
-  scenarios:
-    - {id: suisun, input_prefix: schism_suisun}   # with one entry, behaves like single-scenario
-    - {id: slr,    input_prefix: schism_slr}      # add more entries for true multi-scenario
-    - {id: cache,  input_prefix: schism_cache}
-    - {id: franks, input_prefix: schism_franks}
-
-Workflow parity examples:
-- **Single-scenario parity (base + suisun; two-head architecture):**  
-  - MultiStage: use `transfer_config_multistage.yml` with two GRUs (`lay1` return_sequences: true, `lay2` return_sequences: false) and no branch layers.  
-  - MultiScenario: same trunk/heads as above, `per_scenario_branch: false` and only `suisun` listed under `scenarios`. Outputs and losses match the single-scenario path.
-- **Full multi-task run (base + multiple scenarios):**  
-  - MultiScenario: enable `per_scenario_branch: true`, keep trunk as above, and enumerate all scenarios (suisun/slr/cache/franks, etc.); adds contrast heads for each scenario vs base while reusing preprocessing and frozen trunk weights.
-```
 
 
 ## Postprocessing: Export and Conversion to Native Units
