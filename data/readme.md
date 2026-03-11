@@ -20,7 +20,7 @@ These are the conventions as per CalSim ANN training.
 | dcc              | Delta Cross Channel gate operations (0=Closed, 1=Open) |
 | smscg            | Suisun Marsh Salinity Control Gate operations (0=Open, 1=Tidally Operated) |
 | sf_tidal_energy  | Tidal energy of SFFPX station/boundary. Calculated over stage in feet. < (z- <z>)^2 >, where <> is a low-pass filter |
-| sf_tidal_filter  | Tidal energy of SFFPX station/boundary. Calculated over stage in feet. <z>, where <> is a low-pass filter |
+| sf_tidal_filter  | Subtidal variation around mean of SFFPX station/boundary. Calculated over stage in feet. <z>-z̄, where <> is a low-pass filter, and z̄ is the mean stage over the period of 1990-2020 (0.98 m or 3.22 ft). Note that for SCHISM, this is derived from observed data at SFFPX station, not model output.|
 | x2               | X2 calculated from model EC results |
 | ec locations     | trp,wci,vcu,rsl,old,rri2,bdt,lps,snc,dsj,bdl,nsl2,vol,tss,sss,oh4,god,bac,hol,mtz,tms,gzl,rsl |
 
