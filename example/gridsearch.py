@@ -1,326 +1,321 @@
-import os
-import yaml
-import copy
-import itertools
+"""Single gridsearch driver for both builders.
+
+    python gridsearch.py experiments/<spec>.py          START_TRIAL=<n> to resume
+
+A spec file defines
+    VERSION           run id; outputs go to runs/<VERSION>/ (refused if it exists unless
+                      START_TRIAL > 1, which resumes)
+    CONFIG            YAML template filename in configs/
+    STEPS             step names to run, in order; each loads the previous run step's saved
+                      model, the first loads nothing
+    GRID              {key: [values]}; one trial per combination. Keys:
+        layers        layer specs (feature_layers for MSTAGE, trunk/base layers for MSCEN)
+        freeze        per run step, number of leading layers frozen
+        schedule      {step_name: (init_lr, main_lr, init_epochs, main_epochs)}
+        ndays, contrast_weight, repeat
+        MSCEN only    source_weight, target_weight, per_scenario_branch, branch_layers,
+                      use_contrast_scales
+        MSTAGE only   transfer_type (override for the last run step)
+    CONTRAST_SCALES   optional {station: scale}, used when use_contrast_scales is True
+
+Layout of runs/<VERSION>/: master.csv, provenance.txt, spec.py, then per trial
+    Trial<n>/config_<step>.yml, metrics.csv, models/, xvalid/, plots/<head>/
+
+xvalid file names, as written by staged_learning / xvalid_multi:
+    direct                    {prefix}_xvalid.csv        ref _xvalid_ref_out_unscaled.csv
+    contrastive, multi-direct {prefix}_xvalid_0.csv      ref _xvalid_ref_out_unscaled.csv
+                              {prefix}_xvalid_1.csv      ref _xvalid_ref_out_secondary_unscaled.csv
+    multi-scenario, per tag   {prefix}_xvalid_{tag}.csv  ref _xvalid_ref_out_{tag}_unscaled.csv
+"""
+import copy, importlib.util, itertools, json, os, shutil, socket, subprocess, sys, traceback
+from datetime import datetime
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import traceback
-
+import yaml
 from casanntra.staged_learning import process_config
+from metrics import compute_metrics, load_and_merge, xvalid_pair, xvalid_pair_ms
 
-# Number of combination is multiplicative so define hyperparam space accordingly
-HYPERPARAM_SPACE = {
-    "contrast_weight": [0.5, 1.0, 2.0],  
-    "freeze_bool": [True, False],       
-    "arch_type": ["LSTM", "GRU"],        
-    "init_lr": [0.003, 0.008],           
-    "main_lr": [0.0004, 0.001],           
-    "init_epochs": [10],
-    "main_epochs": [35, 75, 100],
-}
-
-BASE_CONFIG_FILE = "transfer_config.yml"  
-STEPS_TO_RUN = ["dsm2_base", "dsm2.schism", "base.suisun"]
-MASTER_SUMMARY = "gridsearch_master_results.csv" # After gridsearch is done this will store all metrics
+SCRIPT_DIR = Path(__file__).resolve().parent
+RUNS_DIR = SCRIPT_DIR.parent / "runs"
+RECURRENT = ("GRU", "LSTM")
 
 
-MODEL_NAMES = ["base.suisun", "base.suisun-secondary"]
-STATIONS = [
-    "cse","bdl","rsl","emm2","jer","sal","frk","bac",
-    "oh4","x2","mal","god","gzl","vol"
-]
-OUTPUT_PREFIXES = {
-    "base.suisun": "schism_base.suisun_gru2",
-    "base.suisun-secondary": "schism_base.suisun_gru2",
-}
-
-def compute_metrics(y_true, y_pred):
-    mask = (~pd.isnull(y_true)) & (~pd.isnull(y_pred))
-    if mask.sum() < 2:
-        return {"mae": np.nan, "rmse": np.nan, "nse": np.nan, "pearson_r": np.nan}
-    yt = y_true[mask]
-    yp = y_pred[mask]
-
-    mae = np.mean(np.abs(yt - yp))
-    mse = np.mean((yt - yp)**2)
-    rmse = np.sqrt(mse)
-
-    denom = np.sum((yt - np.mean(yt))**2)
-    if denom == 0:
-        nse = np.nan
-    else:
-        nse = 1.0 - np.sum((yt - yp)**2)/denom
-
-    corr = np.corrcoef(yt, yp)[0,1] if len(yt) > 1 else np.nan
-    return {
-        "mae": mae,
-        "rmse": rmse,
-        "nse": nse,
-        "pearson_r": corr,
-    }
-
-def load_and_merge(model_name, trial_suffix):
-    """
-    Merges the ref CSV + ANN CSV from your cross-validation pipeline.
-    e.g. "schism_base.suisun_gru2_Trial1_xvalid_ref_out_unscaled.csv"
-         "schism_base.suisun_gru2_Trial1_xvalid_0.csv"
-    or the "secondary" versions. 
-    """
-    base_prefix = OUTPUT_PREFIXES[model_name]
-    full_prefix = f"{base_prefix}_{trial_suffix}"
-
-    if model_name == "base.suisun-secondary":
-        ref_csv = f"{full_prefix}_xvalid_ref_out_secondary_unscaled.csv"
-        ann_csv = f"{full_prefix}_xvalid_1.csv"
-    else:
-        ref_csv = f"{full_prefix}_xvalid_ref_out_unscaled.csv"
-        ann_csv = f"{full_prefix}_xvalid_0.csv"
-
-    print(f"[DEBUG load_and_merge] => Searching for REF: {ref_csv}")
-    print(f"[DEBUG load_and_merge] => Searching for ANN: {ann_csv}")
-
-    if not os.path.exists(ref_csv):
-        raise FileNotFoundError(f"[load_and_merge] REF CSV not found => {ref_csv}")
-    if not os.path.exists(ann_csv):
-        raise FileNotFoundError(f"[load_and_merge] ANN CSV not found => {ann_csv}")
-
-    df_ref = pd.read_csv(ref_csv, parse_dates=["datetime"])
-    df_ann = pd.read_csv(ann_csv, parse_dates=["datetime"])
-
-    print(f"[DEBUG load_and_merge] => df_ref.shape={df_ref.shape}, df_ann.shape={df_ann.shape}")
-
-    merged = pd.merge(df_ref, df_ann, how="inner", on=["datetime","case"], suffixes=("","_pred"))
-    print(f"[DEBUG load_and_merge] => after merge => merged.shape={merged.shape}")
-    if not merged.empty:
-        print("[DEBUG load_and_merge] => merged columns:", merged.columns.tolist())
-        print(merged.head(5).to_string())
-    return merged
-
-def plot_timeseries_all_cases(df_merged, station, model_name, out_dir, n_cases=7):
-    stcol = station
-    stpred = station + "_pred"
-    if stcol not in df_merged.columns or stpred not in df_merged.columns:
-        print(f"[plot_timeseries_all_cases] Missing => {station}, skip {model_name}")
-        return
-
-    fig, axes = plt.subplots(n_cases,1,figsize=(8,2.5*n_cases),constrained_layout=True)
-    if n_cases==1:
-        axes=[axes]
-
-    for i, ax in enumerate(axes):
-        case_id = i+1
-        subdf = df_merged[df_merged["case"]==case_id]
-        if i==0:
-            ax.set_title(f"[{model_name}] => Station={station}")
-
-        ax.plot(subdf["datetime"], subdf[stcol],   color="0.1", label="Model")
-        ax.plot(subdf["datetime"], subdf[stpred], label="ANN")
-        ax.set_ylabel("Norm EC")
-        ax.set_title(f"Case={case_id}, #rows={subdf.shape[0]}")
-    axes[0].legend()
-
-    fpath = os.path.join(out_dir, f"{model_name}_{station}_timeseries.png")
-    plt.savefig(fpath, dpi=150)
-    plt.close(fig)
-    print(f"[plot_timeseries_all_cases] => wrote plot => {fpath}")
-
-def evaluate_and_plot(trial_dir, hyperparams, trial_suffix):
-    """
-    For each model_name, merges ref+ann, does station-level metrics, 
-    writes them to "trial_evaluation_metrics.csv" in `trial_dir`,
-    plus timeseries plots inside subfolders "<trial_dir>/<model_name>/".
-    Returns summary stats (mean_nse_base, mean_nse_suisun, mean_nse_overall, mean_r2).
-    """
-    print(f"[DEBUG evaluate_and_plot] => trial_dir={trial_dir}, trial_suffix={trial_suffix}")
-    rows=[]
-    for model_name in MODEL_NAMES:
-        print(f"[DEBUG evaluate_and_plot] => model_name={model_name}")
-        try:
-            df_merged = load_and_merge(model_name, trial_suffix)
-        except FileNotFoundError as exc:
-            print(f"[evaluate_and_plot] => skipping {model_name}, reason: {exc}")
-            continue
-
-        if df_merged.empty:
-            print(f"[DEBUG evaluate_and_plot] => merged is empty => skipping {model_name}")
-            continue
-
-        model_out_dir = os.path.join(trial_dir, model_name)
-        os.makedirs(model_out_dir, exist_ok=True)
-        print(f"[DEBUG evaluate_and_plot] => model_out_dir={model_out_dir}, #rows in df_merged={df_merged.shape[0]}")
-
-        for station in STATIONS:
-            if station not in df_merged.columns:
-                print(f"[DEBUG evaluate_and_plot] => station '{station}' not in merged columns => skip")
-                continue
-            stpred = station+"_pred"
-            if stpred not in df_merged.columns:
-                print(f"[DEBUG evaluate_and_plot] => station pred '{stpred}' not in columns => skip")
-                continue
-
-            sub_n = df_merged[[station, stpred]].dropna().shape[0]
-            print(f"[DEBUG evaluate_and_plot] => computing metrics for station={station}, #non-na rows={sub_n}")
-
-            met = compute_metrics(df_merged[station], df_merged[stpred])
-            row = {
-                "model": model_name,
-                "station": station,
-                "mae": round(met["mae"],4),
-                "rmse": round(met["rmse"],4),
-                "nse": round(met["nse"],4),
-                "pearson_r": round(met["pearson_r"],4),
-            }
-            for k,v in hyperparams.items():
-                row[k] = v
-            rows.append(row)
-            plot_timeseries_all_cases(df_merged, station, model_name, model_out_dir, n_cases=7)
-
-    if not rows:
-        print("[DEBUG evaluate_and_plot] => no rows => returning None")
+def canon_transfer(val):
+    if val in (None, "None", "null", "", "NULL"):
         return None
-
-    df_trial = pd.DataFrame(rows)
-    df_trial_csv = os.path.join(trial_dir,"trial_evaluation_metrics.csv")
-    df_trial.to_csv(df_trial_csv, index=False)
-    print(f"[evaluate_and_plot] => wrote station-level metrics => {df_trial_csv}, rowcount={df_trial.shape[0]}")
-
-    df_base = df_trial[df_trial["model"]=="base.suisun"]
-    df_suisun = df_trial[df_trial["model"]=="base.suisun-secondary"]
-    mean_nse_base   = round(df_base["nse"].mean(),4) if len(df_base)>0 else np.nan
-    mean_nse_suisun = round(df_suisun["nse"].mean(),4) if len(df_suisun)>0 else np.nan
-    overall_nse     = round(df_trial["nse"].mean(),4)
-
-    df_trial["r2"] = df_trial["pearson_r"]**2
-    mean_r2 = round(df_trial["r2"].mean(),4)
-
-    print(f"[DEBUG evaluate_and_plot] => mean_nse_base={mean_nse_base}, mean_nse_suisun={mean_nse_suisun}, overall_nse={overall_nse}, mean_r2={mean_r2}")
-    return {
-        "mean_nse_base": mean_nse_base,
-        "mean_nse_suisun": mean_nse_suisun,
-        "mean_nse_overall": overall_nse,
-        "mean_r2": mean_r2
-    }
+    return str(val).lower()
 
 
-def load_yml(path):
-    print(f"[DEBUG load_yml] => loading config from {path}")
-    with open(path,"r") as f:
-        return yaml.safe_load(f)
+def load_spec(path):
+    spec = importlib.util.spec_from_file_location("experiment", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for name in ("VERSION", "CONFIG", "STEPS", "GRID"):
+        if not hasattr(module, name):
+            raise ValueError(f"{path} must define {name}")
+    return module
 
-def save_yml(obj, path):
-    print(f"[DEBUG save_yml] => saving updated config to {path}")
-    with open(path,"w") as f:
-        yaml.safe_dump(obj, f, sort_keys=False)
+
+def builder_family(cfg):
+    name = cfg["model_builder_config"]["builder_name"]
+    if name == "MultiStageModelBuilder":
+        return "mstage"
+    if name == "MultiScenarioModelBuilder":
+        return "mscen"
+    raise ValueError(f"unsupported builder_name {name}")
 
 
-# GridSearch + Evaluate
-def main():
-    print(f"[DEBUG main] => Checking if old scoreboard {MASTER_SUMMARY} exists..")
-    if os.path.exists(MASTER_SUMMARY):
-        print(f"[DEBUG main] => removing old {MASTER_SUMMARY}")
-        os.remove(MASTER_SUMMARY)
+def write_provenance(run_dir, spec_path):
+    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=SCRIPT_DIR).stdout.strip()
+    diff = subprocess.run(["git", "diff"], capture_output=True, text=True, cwd=SCRIPT_DIR).stdout
+    header = f"started {datetime.now():%Y-%m-%d %H:%M:%S}\nhost {socket.gethostname()}\npython {sys.executable}\nHEAD {head}\n"
+    (run_dir / "provenance.txt").write_text(header + "\n" + diff)
+    shutil.copy(spec_path, run_dir / "spec.py")
 
-    print(f"[DEBUG main] => Loading base config file => {BASE_CONFIG_FILE}")
-    base_cfg = load_yml(BASE_CONFIG_FILE)
 
-    keys = list(HYPERPARAM_SPACE.keys())
-    combos = list(itertools.product(*[HYPERPARAM_SPACE[k] for k in keys]))
-    all_combos = [dict(zip(keys, c)) for c in combos]
-    print(f"[DEBUG main] => total combos = {len(all_combos)}")
-    print(f"[DEBUG main] => combos = {all_combos}")
+def freeze_layers(layers, freeze, run_idx):
+    layers = copy.deepcopy(layers)
+    n_frozen = freeze[run_idx] if run_idx < len(freeze) else 0
+    for j, layer in enumerate(layers):
+        layer["trainable"] = j >= n_frozen
+    return layers
 
-    trial_counter=0
-    for combo in all_combos:
-        trial_counter+=1
-        trial_name = f"Trial{trial_counter}"
-        print(f"\n=== Starting {trial_name} with => {combo}")
 
-        mod_cfg = copy.deepcopy(base_cfg)
+def prepare_step(step, combo, run_idx, is_last, trial_dir, last_saved, family, contrast_scales):
+    name = Path(step["output_prefix"]).name
+    step["output_prefix"] = str(trial_dir / "xvalid" / name)
+    if step.get("save_model_fname") not in (None, "None"):
+        step["save_model_fname"] = str(trial_dir / "models" / name)
+    bargs = step.get("builder_args") or {}
+    step["builder_args"] = bargs
+    is_multi = family == "mscen" and bool(bargs.get("scenarios"))
+    if step.get("load_model_fname") not in (None, "None"):
+        step["load_model_fname"] = last_saved
+        if last_saved is None and not is_multi:
+            bargs["transfer_type"] = None
 
-        for i, step in enumerate(mod_cfg["steps"]):
-            old_prefix = step["output_prefix"]
-            step["output_prefix"] = f"{step['output_prefix']}_{trial_name}"
-            print(f"[DEBUG] step[{i}] => old_prefix={old_prefix}, new_prefix={step['output_prefix']}")
+    init_lr, main_lr, init_epochs, main_epochs = combo["schedule"][step["name"]]
+    step.update(init_train_rate=init_lr, main_train_rate=main_lr, init_epochs=init_epochs, main_epochs=main_epochs)
+    bargs["ndays"] = combo["ndays"]
 
-            if step.get("save_model_fname") not in [None,"None"]:
-                old_save = step["save_model_fname"]
-                step["save_model_fname"] = f"{old_save}_{trial_name}"
-                print(f"           => save_model_fname = {step['save_model_fname']}")
-            if step.get("load_model_fname") not in [None,"None"]:
-                old_load = step["load_model_fname"]
-                step["load_model_fname"] = f"{old_load}_{trial_name}"
-                print(f"           => load_model_fname = {step['load_model_fname']}")
-
-            step["init_train_rate"] = combo["init_lr"]
-            step["main_train_rate"] = combo["main_lr"]
-            step["init_epochs"] = combo["init_epochs"]
-            step["main_epochs"] = combo["main_epochs"]
-            print(f"=> init_lr={step['init_train_rate']}, main_lr={step['main_train_rate']}")
-            print(f"=> init_epochs={step['init_epochs']}, main_epochs={step['main_epochs']}")
-
-            bargs = step.get("builder_args", {})
+    if family == "mstage":
+        if is_last and "transfer_type" in combo:
+            bargs["transfer_type"] = combo["transfer_type"]
+            if canon_transfer(combo["transfer_type"]) == "direct":
+                for key in ("source_data_prefix", "source_input_mask_regex", "contrast_weight", "save_modified_orig_model_fname"):
+                    bargs.pop(key, None)
+        if "contrast_weight" in combo and canon_transfer(bargs.get("transfer_type")) in ("contrastive", "multi-direct"):
             bargs["contrast_weight"] = combo["contrast_weight"]
-            bargs["freeze_bool"] = combo["freeze_bool"]
-            bargs["arch_type"] = combo["arch_type"]
-            step["builder_args"]=bargs
-            print(f"=> builder_args={bargs}")
+        bargs["feature_layers"] = freeze_layers(combo["layers"], combo["freeze"], run_idx)
+        return canon_transfer(bargs.get("transfer_type"))
 
-        tmp_config_file = f"tmp_{trial_name}.yml"
-        save_yml(mod_cfg, tmp_config_file)
-
-        trial_dir = f"Contrastive_{trial_name}_results"
-        print(f"[DEBUG main] => creating trial_dir={trial_dir}")
-        os.makedirs(trial_dir, exist_ok=True)
-
-        print(f"[DEBUG main] => calling process_config with {tmp_config_file}, steps={STEPS_TO_RUN}")
-        error_happened = False
-        try:
-            process_config(tmp_config_file, STEPS_TO_RUN)
-            print(f"[DEBUG main] => process_config finished for {trial_name}")
-        except Exception as ex:
-            print(f"[{trial_name}] => training error => {ex}")
-            traceback.print_exc()
-            error_happened = True
-        finally:
-            if os.path.exists(tmp_config_file):
-                print(f"[DEBUG main] => removing temp config => {tmp_config_file}")
-                os.remove(tmp_config_file)
-
-        if error_happened:
-            print(f"[DEBUG main] => skipping evaluate for {trial_name} because error")
-            continue
-
-        print(f"[DEBUG main] => calling evaluate_and_plot for {trial_dir}, suffix={trial_name}")
-        summary = evaluate_and_plot(trial_dir, combo, trial_name)
-        if summary is None:
-            print(f"[{trial_name}] => No station data => skipping scoreboard entry.")
-            continue
-
-        rowd = {
-            "trial_name": trial_name,
-            "mean_nse_base":    summary["mean_nse_base"],
-            "mean_nse_suisun":  summary["mean_nse_suisun"],
-            "mean_nse_overall": summary["mean_nse_overall"],
-            "mean_r2":          summary["mean_r2"]
-        }
-        for k,v in combo.items():
-            rowd[k]=v
-
-        print(f"[DEBUG main] => writing summary row => {rowd}")
-        mode = "a" if os.path.exists(MASTER_SUMMARY) else "w"
-        df_temp = pd.DataFrame([rowd])
-        df_temp.to_csv(MASTER_SUMMARY, mode=mode, header=(not os.path.exists(MASTER_SUMMARY)), index=False)
-
-    if os.path.exists(MASTER_SUMMARY):
-        print(f"[DEBUG main] => Reading final scoreboard => {MASTER_SUMMARY}")
-        df = pd.read_csv(MASTER_SUMMARY)
-        df_sorted = df.sort_values("mean_nse_overall", ascending=False)
-        print("\n=== FINAL SCOREBOARD ===")
-        print(df_sorted)
+    recurrent_branch = combo.get("per_scenario_branch", False) and any(bl["type"].upper() in RECURRENT for bl in combo.get("branch_layers", []))
+    if is_multi:
+        bargs["per_scenario_branch"] = combo.get("per_scenario_branch", False)
+        bargs["branch_layers"] = copy.deepcopy(combo.get("branch_layers", []))
+        bargs["source_weight"] = combo.get("source_weight", 1.0)
+        bargs["target_weight"] = combo.get("target_weight", 1.0)
+        bargs["contrast_weight"] = combo["contrast_weight"]
+        if combo.get("use_contrast_scales", False):
+            if contrast_scales is None:
+                raise ValueError("use_contrast_scales=True but the spec defines no CONTRAST_SCALES")
+            bargs["contrast_scales"] = dict(contrast_scales)
+        else:
+            bargs.pop("contrast_scales", None)
+        if recurrent_branch:
+            bargs["include_source_branch"] = True
+    layers = freeze_layers(combo["layers"], combo["freeze"], run_idx)
+    if not (is_multi and recurrent_branch):
+        layers[-1]["return_sequences"] = False
+    if canon_transfer(bargs.get("transfer_type")) in (None, "direct"):
+        bargs["base_layers"] = layers
     else:
-        print("No successful trials => no summary at all.")
+        bargs["trunk_layers"] = layers
+    return canon_transfer(bargs.get("transfer_type"))
 
 
-if __name__=="__main__":
-    main()
+
+
+
+
+
+
+
+
+def sort_cases(cases):
+    return sorted(c for c in cases if not isinstance(c, str)) + sorted(c for c in cases if isinstance(c, str))
+
+
+def plot_cases(df, station, label, out_dir, n_cases=7):
+    pred = f"{station}_pred"
+    cases = sort_cases([c for c in pd.unique(df["case"]) if pd.notnull(c)])[:n_cases]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(len(cases), 1, figsize=(8, 2.5 * len(cases)), constrained_layout=True, squeeze=False)
+    for ax, case_id in zip(axes[:, 0], cases):
+        sub = df[df["case"] == case_id]
+        ax.plot(sub["datetime"], pd.to_numeric(sub[station], errors="coerce"), label="Ref")
+        ax.plot(sub["datetime"], pd.to_numeric(sub[pred], errors="coerce"), label="ANN")
+        ax.set_title(f"[{label}]  station={station}  case={case_id}")
+    axes[0, 0].legend()
+    plt.savefig(out_dir / f"{label}_{station}.png", dpi=150)
+    plt.close(fig)
+
+
+def station_rows(specs, stations, combo, trial_dir, label_col):
+    rows = []
+    for label, ref_csv, ann_csv in specs:
+        df = load_and_merge(ref_csv, ann_csv)
+        for station in stations:
+            if station not in df.columns or f"{station}_pred" not in df.columns:
+                continue
+            met = compute_metrics(df[station], df[f"{station}_pred"])
+            rows.append({**combo, label_col: label, "station": station, **{k: round(v, 4) for k, v in met.items()}})
+            plot_cases(df, station, label, trial_dir / "plots" / str(label))
+    if not rows:
+        raise ValueError("no stations evaluated; station list does not match output columns")
+    df_trial = pd.DataFrame(rows)
+    df_trial["r2"] = df_trial["pearson_r"] ** 2
+    df_trial.to_csv(trial_dir / "metrics.csv", index=False)
+    return df_trial
+
+
+def evaluate_mstage(run_steps, step_transfer, stations, combo, trial_dir):
+    """mean_nse_overall = 0.5 * (base + target); base = secondary head if present, else the previous step."""
+    target = run_steps[-1]
+    tt = step_transfer[target["name"]]
+    specs = [(target["name"], *xvalid_pair(target["output_prefix"], tt))]
+    secondary = stage2 = None
+    if tt in ("contrastive", "multi-direct"):
+        secondary = f"{target['name']}-secondary"
+        specs.append((secondary, *xvalid_pair(target["output_prefix"], tt, role="secondary")))
+    if len(run_steps) > 1:
+        prev = run_steps[-2]
+        stage2 = prev["name"]
+        specs.append((stage2, *xvalid_pair(prev["output_prefix"], step_transfer[stage2])))
+    df = station_rows(specs, stations, combo, trial_dir, "model")
+    df_target = df[df["model"] == target["name"]]
+    df_base = df[df["model"] == secondary] if secondary else df.iloc[0:0]
+    if not len(df_base) and stage2:
+        df_base = df[df["model"] == stage2]
+    mean_base = round(df_base["nse"].mean(), 4) if len(df_base) else np.nan
+    mean_target = round(df_target["nse"].mean(), 4)
+    overall = round(0.5 * (mean_base + mean_target), 4) if len(df_base) else mean_target
+    df_all = pd.concat([df_target, df_base])
+    return {"mean_nse_base": mean_base, "mean_nse_target": mean_target, "mean_nse_overall": overall, "mean_r2": round(df_all["r2"].mean(), 4)}
+
+
+def evaluate_mscen(multi_step, tags, stations, combo, trial_dir):
+    """mean_nse_overall = flat mean over all (tag, station) rows."""
+    specs = [(tag, *xvalid_pair_ms(multi_step["output_prefix"], tag)) for tag in tags]
+    df = station_rows(specs, stations, combo, trial_dir, "tag")
+    summary = {f"mean_nse_{tag}": round(df[df["tag"] == tag]["nse"].mean(), 4) for tag in tags}
+    summary["mean_nse_overall"] = round(df["nse"].mean(), 4)
+    summary["mean_r2"] = round(df["r2"].mean(), 4)
+    return summary
+
+
+def append_master_row(master_csv, row, columns):
+    df = pd.DataFrame([{c: row.get(c, np.nan) for c in columns}], columns=columns)
+    if master_csv.exists():
+        existing = pd.read_csv(master_csv, nrows=0).columns.tolist()
+        if existing != list(columns):
+            raise ValueError(f"master CSV header mismatch in {master_csv}: {existing} vs {list(columns)}")
+        df.to_csv(master_csv, mode="a", header=False, index=False)
+    else:
+        df.to_csv(master_csv, mode="w", header=True, index=False)
+
+
+def main(spec_path):
+    exp = load_spec(spec_path)
+    run_id = exp.VERSION
+    contrast_scales = getattr(exp, "CONTRAST_SCALES", None)
+    run_dir = RUNS_DIR / run_id
+    master_csv = run_dir / "master.csv"
+    start_trial = int(os.environ.get("START_TRIAL", "1"))
+    if start_trial == 1 and run_dir.exists():
+        raise SystemExit(f"{run_dir} exists: bump VERSION, or set START_TRIAL=<n> to resume")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    write_provenance(run_dir, spec_path)
+
+    base_cfg = yaml.safe_load((SCRIPT_DIR / "configs" / exp.CONFIG).read_text())
+    family = builder_family(base_cfg)
+    stations = list(base_cfg["model_builder_config"]["args"]["output_names"])
+    step_defs = {s["name"]: s for s in base_cfg["steps"]}
+    missing = [s for s in exp.STEPS if s not in step_defs]
+    if missing:
+        raise ValueError(f"STEPS not in {exp.CONFIG}: {missing}")
+
+    if family == "mscen":
+        multi_def = next((s for s in base_cfg["steps"] if s["name"] in exp.STEPS and (s.get("builder_args") or {}).get("scenarios")), None)
+        if multi_def is None:
+            raise ValueError("MSCEN run needs a step with scenarios among STEPS")
+        tags = ["base"] + [sc["id"] for sc in multi_def["builder_args"]["scenarios"]]
+        summary_cols = [f"mean_nse_{tag}" for tag in tags] + ["mean_nse_overall", "mean_r2"]
+    else:
+        summary_cols = ["mean_nse_base", "mean_nse_target", "mean_nse_overall", "mean_r2"]
+    grid_keys = list(exp.GRID)
+    columns = ["trial_name", "status"] + summary_cols + grid_keys
+    combos = [dict(zip(grid_keys, values)) for values in itertools.product(*[exp.GRID[k] for k in grid_keys])]
+    print(f"{run_id} | {family} | steps={exp.STEPS} | {len(combos)} trial(s)")
+
+    for t_idx, combo in enumerate(combos, start=1):
+        if t_idx < start_trial:
+            continue
+        trial = f"Trial{t_idx}"
+        print(f"\n========= {trial} =========")
+        print(json.dumps(combo, indent=2, default=str))
+        cfg = copy.deepcopy(base_cfg)
+        cfg["model_builder_config"]["args"]["ndays"] = combo["ndays"]
+        trial_dir = run_dir / trial
+        for sub in ("models", "xvalid", "plots"):
+            (trial_dir / sub).mkdir(parents=True, exist_ok=True)
+
+        run_steps = [s for s in cfg["steps"] if s["name"] in exp.STEPS]
+        step_transfer = {}
+        failed_step = None
+        last_saved = None
+        for run_idx, step in enumerate(run_steps):
+            step_transfer[step["name"]] = prepare_step(step, combo, run_idx, run_idx == len(run_steps) - 1, trial_dir, last_saved, family, contrast_scales)
+            if step.get("save_model_fname") not in (None, "None"):
+                last_saved = step["save_model_fname"]
+            step_yaml = trial_dir / f"config_{step['name']}.yml"
+            step_yaml.write_text(yaml.safe_dump({"output_dir": str(trial_dir), "model_builder_config": cfg["model_builder_config"], "steps": [step]}, sort_keys=False))
+            try:
+                process_config(step_yaml, [step["name"]])
+            except Exception as e:
+                print(f"ERROR | {trial} | {step['name']}: {e}")
+                traceback.print_exc()
+                failed_step = step["name"]
+                break
+
+        row = {"trial_name": trial, **{k: (json.dumps(v, default=str) if isinstance(v, (dict, list)) else v) for k, v in combo.items()}}
+        if failed_step is not None:
+            append_master_row(master_csv, {**row, "status": f"failed:{failed_step}"}, columns)
+            continue
+        try:
+            if family == "mscen":
+                multi_step = next(s for s in run_steps if s["builder_args"].get("scenarios"))
+                summary = evaluate_mscen(multi_step, tags, stations, combo, trial_dir)
+            else:
+                summary = evaluate_mstage(run_steps, step_transfer, stations, combo, trial_dir)
+        except Exception as e:
+            print(f"ERROR | {trial} | evaluation failed: {e}")
+            traceback.print_exc()
+            append_master_row(master_csv, {**row, "status": f"eval_error:{type(e).__name__}"}, columns)
+            continue
+        append_master_row(master_csv, {**row, "status": "ok", **summary}, columns)
+
+    if master_csv.exists():
+        df = pd.read_csv(master_csv)
+        print(f"\n========= FINAL SCOREBOARD ({run_id}) =========")
+        print(df.sort_values("mean_nse_overall", ascending=False).head(20).to_string(index=False))
+    else:
+        print("No trials recorded.")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: python gridsearch.py experiments/<spec>.py")
+    main(sys.argv[1])

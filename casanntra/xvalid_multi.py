@@ -9,18 +9,14 @@ import pandas as pd
 
 
 def _multi_scenario_tags(builder, count):
-    is_ms = getattr(builder, "is_multi_scenario_step", lambda: False)()
-    if not is_ms:
+    """Output-head labels used in file names: '0','1',... for non-multi-scenario steps,
+    ['base', <scenario ids>] for multi-scenario steps. Raises if the config does not
+    match the number of output heads (the two are built from the same scenarios list)."""
+    if not builder.is_multi_scenario_step():
         return [str(i) for i in range(count)]
-
-    try:
-        sc_cfg = builder.builder_args.get("scenarios", []) or []
-    except Exception:
-        sc_cfg = []
-
-    tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
+    tags = ["base"] + [sc["id"] for sc in builder.builder_args.get("scenarios", [])]
     if len(tags) != count:
-        tags = ["base"] + [f"scenario{i}" for i in range(1, count)]
+        raise ValueError(f"{len(tags)} scenario tags for {count} output heads: {tags}")
     return tags
 
 

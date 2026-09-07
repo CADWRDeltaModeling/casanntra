@@ -1,0 +1,120 @@
+output_dir: "./output"
+
+model_builder_config:
+  builder_name: MultiScenarioModelBuilder
+  args:
+    input_names:
+      - northern_flow
+      - exports
+      - sjr_flow
+      - cu_delta
+      - sf_tidal_energy
+      - sf_tidal_filter
+      - dcc
+      - smscg
+    output_names:
+      x2: 100.0
+      mrz: 30000.0
+      pct: 20000.0
+      mal: 15000.0
+      god: 12000.0
+      vol: 12000.0
+      gzl: 20000.0
+      bdl: 14000.0
+      nsl2: 12000.0
+      cse: 14000.0
+      emm2: 4000.0
+      tms: 3000.0
+      anh: 6000.0
+      jer: 3000.0
+      sal: 1200.0
+      frk: 2500.0
+      srv: 1200.0
+      bac: 1500.0
+      rsl: 1500.0
+      oh4: 1200.0
+    ndays: 105
+
+steps:
+# --- Step 1: DSM2 pretraining ---
+- name: dsm2_base
+  input_prefix: dsm2_base
+  input_mask_regex: [dsm2_base_historical.csv, dsm2_base_calsim.csv]
+  output_prefix: "{output_dir}/dsm2_base_gru2"
+  save_model_fname: "{output_dir}/dsm2_base_gru2"
+  load_model_fname: null
+  pool_size: 12
+  pool_aggregation: true
+  target_fold_length: 180d
+  init_train_rate: 0.008
+  init_epochs: 10
+  main_train_rate: 0.001
+  main_epochs: 35
+  builder_args:
+    transfer_type: None
+    ann_output_name: dsm2_base
+    base_layers:
+      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
+    branch_layers: []
+    include_source_branch: false
+    head_activation: elu
+
+# --- Step 2: Transfer to RMA base (direct, single-task) ---
+- name: dsm2.rma
+  input_prefix: rma_base
+  input_mask_regex: null
+  output_prefix: "{output_dir}/dsm2.rma_base_gru2"
+  save_model_fname: "{output_dir}/dsm2.rma_base_gru2"
+  load_model_fname: "{output_dir}/dsm2_base_gru2"
+  pool_size: 12
+  pool_aggregation: false
+  target_fold_length: 180d
+  init_train_rate: 0.003
+  init_epochs: 10
+  main_train_rate: 0.001
+  main_epochs: 35
+  builder_args:
+    transfer_type: direct
+    ann_output_name: rma_base
+    base_layers:
+      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
+    branch_layers: []
+    include_source_branch: false
+    head_activation: elu
+
+# --- Step 3: Multi-scenario joint training (base + scenarios) ---
+- name: base.multi
+  input_prefix: rma_base
+  input_mask_regex: null
+  output_prefix: "{output_dir}/rma_base.multi_gru2"
+  save_model_fname: "{output_dir}/rma_base.multi_gru2"
+  load_model_fname: "{output_dir}/dsm2_base_gru2"
+  pool_size: 12
+  pool_aggregation: false
+  target_fold_length: 180d
+  init_train_rate: 0.001
+  init_epochs: 10
+  main_train_rate: 0.0005
+  main_epochs: 35
+  builder_args:
+    transfer_type: contrastive
+    trunk_layers:
+      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
+    branch_layers: []
+    include_source_branch: false
+    head_activation: elu
+    source_weight: 1.0
+    target_weight: 1.0
+    contrast_weight: 0.5
+    source_data_prefix: rma_base
+    source_input_mask_regex: null
+    scenarios:
+      - id: suisun
+        input_prefix: rma_suisun
+      # - id: cache
+      #   input_prefix: rma_cache
+      # - id: ft
+      #   input_prefix: rma_ft

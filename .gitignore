@@ -119,3 +119,7 @@ example/output/
 
 # project-specific
 example/hide
+
+# experiment outputs and private working material
+runs/
+work/

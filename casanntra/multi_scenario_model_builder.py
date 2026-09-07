@@ -2,11 +2,12 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.keras import Model, regularizers, layers
-from tensorflow.keras.layers import Input, GRU, LSTM, Dense, Reshape, Concatenate
+from tensorflow.keras import Model, layers
+from tensorflow.keras.layers import GRU, LSTM, Dense, Reshape, Concatenate
 from keras.models import load_model
 
-from casanntra.model_builder import (ModelBuilder, UnscaleLayer, ScaledMaskedMAE, ScaledMaskedMSE, masked_mae, masked_mse, ModifiedExponentialDecayLayer)
+from casanntra.model_builder import ModelBuilder, UnscaleLayer, ScaledMaskedMAE, ScaledMaskedMSE, masked_mae, masked_mse
+from casanntra.multi_stage_model_builder import MultiStageModelBuilder
 
 class MultiScenarioModelBuilder(ModelBuilder):
     def __init__(self, input_names, output_names, ndays=90, **kwargs):
@@ -41,7 +42,7 @@ class MultiScenarioModelBuilder(ModelBuilder):
         tt = "direct" if tt in (None, "None") else str(tt).lower()
         if tt == "difference":
             tt = "direct"
-        if tt not in ("direct", "contrastive"):
+        if tt not in ("direct", "contrastive", "multi-direct"):
             raise ValueError(f"Unknown transfer_type: {tt}")
         
         self.transfer_type = tt
@@ -77,18 +78,29 @@ class MultiScenarioModelBuilder(ModelBuilder):
         self._contrast_keys = [spec["out_name"] for spec in self.head_plan if spec["kind"] == "contrast"]
 
     def requires_secondary_data(self) -> bool:
-        return self.transfer_type == "contrastive" and len(self.scenarios_cfg) > 0
+        return self.transfer_type in ("contrastive", "multi-direct") and len(self.scenarios_cfg) > 0
 
     def is_multi_scenario_step(self) -> bool:
-        try:
-            return (self.transfer_type == "contrastive" and isinstance(self.scenarios_cfg, list)
-                and len(self.scenarios_cfg) > 0
-            )
-        except Exception:
-            return False
+        return self.transfer_type in ("contrastive", "multi-direct") and len(self.scenarios_cfg) > 0
 
     def num_outputs(self):
         return len(self._supervised_keys) if self._supervised_keys else 1
+
+    def _contrast_loss_scales(self):
+        """Loss scales for the contrast heads (contrast-scale A/B, 2026-08-27).
+
+        When builder_args provides 'contrast_scales' (station -> typical contrast
+        magnitude), contrast residuals are normalized by those instead of the
+        absolute output scales. When the key is absent, returns the absolute
+        output scales - byte-identical to the pre-A/B behavior.
+        """
+        cs = self.builder_args.get("contrast_scales", None)
+        if cs is None:
+            return list(self.output_names.values())
+        missing = [s for s in self.output_names if s not in cs]
+        if missing:
+            raise ValueError(f"contrast_scales missing stations: {missing}")
+        return [float(cs[s]) for s in self.output_names]
 
     def map_prediction_keys_to_outputs(self, pred_keys):
         if not self.requires_secondary_data():
@@ -118,7 +130,8 @@ class MultiScenarioModelBuilder(ModelBuilder):
             builder="branch" if use_base_branch else "shared",
             dense_name="head_base_scaled"))
 
-        if self.transfer_type != "contrastive" or len(self.scenarios_cfg) == 0:
+        # direct: base only, contrastive/multi-direct: base + scenarios
+        if self.transfer_type not in ("contrastive", "multi-direct") or len(self.scenarios_cfg) == 0:
             return plan
 
         for sc in self.scenarios_cfg:
@@ -132,12 +145,14 @@ class MultiScenarioModelBuilder(ModelBuilder):
                 loss_weight=tgt_w,
                 builder="branch" if use_branch else "shared",
                 dense_name=f"head_{sid}_scaled"))
-            ctr_w = float(sc.get("contrast_weight", self.contrast_weight_default))
-            plan.append(self._contrast_spec(
-                out_name=f"out_{sid}_contrast_unscaled",
-                pos_head=sid,
-                neg_head="base",
-                loss_weight=ctr_w))
+            # Only add contrast heads for contrastive mode (not multi-direct)
+            if self.transfer_type == "contrastive":
+                ctr_w = float(sc.get("contrast_weight", self.contrast_weight_default))
+                plan.append(self._contrast_spec(
+                    out_name=f"out_{sid}_contrast_unscaled",
+                    pos_head=sid,
+                    neg_head="base",
+                    loss_weight=ctr_w))
 
         return plan
 
@@ -208,8 +223,10 @@ class MultiScenarioModelBuilder(ModelBuilder):
         if is_recurrent:
             if len(tensor.shape) == 3:
                 return layer(tensor)
-            feat3 = layers.Lambda(lambda t: tf.expand_dims(t, axis=1))(tensor)
-            return layer(feat3)
+            raise ValueError(
+                f"Recurrent branch layer '{layer.name}' received 2D input {tensor.shape}. "
+                f"Trunk's last layer must have return_sequences=True for recurrent branches."
+            )
         return layer(tensor)
 
     def _build_head(self, feat, head_id: str, use_branch: bool, dense_name: Optional[str] = None) -> Dict[str, tf.Tensor]:
@@ -219,6 +236,8 @@ class MultiScenarioModelBuilder(ModelBuilder):
                 cls = self._layer_cls(spec["type"])
                 layer_name = self._branch_layer_name(spec, head_id, idx)
                 kw = {k: v for k, v in spec.items() if k not in {"type", "name"}}
+                if cls in (GRU, LSTM):
+                    kw.setdefault("activation", "sigmoid")
                 layer = cls(name=layer_name, **kw)
                 z = self._apply_branch_layer(z, layer, cls in (GRU, LSTM))
 
@@ -236,81 +255,88 @@ class MultiScenarioModelBuilder(ModelBuilder):
         print(f"[MultiScenario] Loading base model from: {self.load_model_fname}")
         base_model = load_model(self.load_model_fname + ".h5", custom_objects=self.custom_objects)
 
-        try:
-            base_model.load_weights(self.load_model_fname + ".weights.h5")
-        except Exception:
-            pass 
+        base_model.load_weights(self.load_model_fname + ".weights.h5")
         return base_model
 
-    def _try_copy_layer_weights(self, src_model: Model, dst_model: Model, src_name: str, dst_name: str) -> bool:
-        src_layers = {l.name for l in src_model.layers}
-        dst_layers = {l.name for l in dst_model.layers}
-        if src_name in src_layers and dst_name in dst_layers:
-            try:
-                dst_model.get_layer(dst_name).set_weights(src_model.get_layer(src_name).get_weights())
-                print(f"[weights] copied {src_name} -> {dst_name}")
-                return True
-            except Exception as e:
-                print(f"[weights] skip copy {src_name}->{dst_name}: {e}")
-        return False
-
-    def _init_all_weights(self, prev: Optional[Model], ann: Model):
-        if prev is None:
-            return
-
-        for spec in self.trunk_spec:
-            lname = spec.get("name")
-            if lname:
-                self._try_copy_layer_weights(prev, ann, lname, lname)
-
-        for idx, spec in enumerate(self.branch_layers):
-            base_name = spec.get("name", f"branch_{idx+1}")
-            if base_name:
-                self._try_copy_layer_weights(prev, ann, base_name, base_name)
-
-        possible_prev_heads = ["head_base_scaled", "source_scaled", "target_scaled", "out_scaled", "out_target_scaled"]
-        for src_head in possible_prev_heads:
-            if self._try_copy_layer_weights(prev, ann, src_head, "head_base_scaled"):
-                break
-
-        if self.init_targets_from_source:
-            for sc in self.scenarios_cfg:
-                sid = sc["id"]
-                self._try_copy_layer_weights(ann, ann, "head_base_scaled", f"head_{sid}_scaled")
-                for idx, spec in enumerate(self.branch_layers):
-                    base_name = spec.get("name", f"branch_{idx+1}")
-                    if not base_name:
-                        continue
-                    self._try_copy_layer_weights(ann, ann, base_name, self._branch_layer_name(spec, sid, idx))
-
-    def _copy_preprocessing_layers(self, prev: Optional[Model], ann: Model):
-        if prev is None:
-            return
-
-        prev_layers = {l.name: l for l in prev.layers}
-        ann_layer_names = {l.name for l in ann.layers}
-
-        for feature in self.input_names:
-            lname = f"{feature}_prepro"
-            if lname not in prev_layers or lname not in ann_layer_names:
-                continue
-            try:
-                ann_layer = ann.get_layer(lname)
-                prev_layer = prev_layers[lname]
-                ann_layer.set_weights(prev_layer.get_weights())
-                ann_layer.trainable = prev_layer.trainable
-                print(f"[prepro] copied {lname}")
-            except Exception as exc:
-                print(f"[prepro] skip copy {lname}: {exc}")
+    def _get_old_head_weights(self, prev: Model):
+        """Get head weights from previous model, trying various possible layer names."""
+        possible_names = ["head_base_scaled", "source_scaled", "target_scaled", "out_scaled", "out_target_scaled"]
+        prev_layer_names = {l.name for l in prev.layers}
+        for name in possible_names:
+            if name in prev_layer_names:
+                print(f"[weights] found previous head weights from: {name}")
+                return prev.get_layer(name).get_weights()
+        raise ValueError(f"loaded model has no head layer among {possible_names}")
 
     def build_model(self, input_layers, input_data):
-        prepro = self.prepro_layers(input_layers, input_data)
-        expanded = [Reshape((self.ndays, 1))(t) for t in prepro]
-        x = Concatenate(axis=-1, name="stacked")(expanded)
+        # Load previous model FIRST (like MSTAGE approach)
+        prev = self._load_previous_model()
 
-        feat = self._build_trunk(x)
+        if prev is not None:
+            # REUSE loaded model's computation graph (MSTAGE approach)
+            # This preserves all internal layer state exactly
+            if isinstance(prev.input, list):
+                input_layer = {layer.name: layer for layer in prev.input}
+            else:
+                input_layer = prev.input
+
+            # Check if recurrent branches need full sequences from trunk
+            has_recurrent_branch = (
+                self.branch_layers
+                and any(self._layer_cls(bl["type"]) in (GRU, LSTM)
+                        for bl in self.branch_layers)
+                and (self.per_scenario_branch or self.include_source_branch)
+            )
+
+            last_trunk_name = self.trunk_spec[-1].get("name", f"trunk_{len(self.trunk_spec)}")
+            last_trunk_layer = prev.get_layer(last_trunk_name)
+
+            if has_recurrent_branch and not last_trunk_layer.return_sequences:
+                # Rebuild last trunk layer with return_sequences=True so
+                # recurrent branches receive the full temporal sequence.
+                # GRU weights are independent of return_sequences.
+                print(f"[MultiScenario] Rebuilding {last_trunk_name} with return_sequences=True for recurrent branches")
+
+                if len(self.trunk_spec) > 1:
+                    prev_trunk_name = self.trunk_spec[-2].get("name", f"trunk_{len(self.trunk_spec)-1}")
+                    prev_trunk_output = prev.get_layer(prev_trunk_name).output
+                else:
+                    prev_trunk_output = prev.get_layer("stacked").output
+
+                last_spec = self.trunk_spec[-1]
+                cls = self._layer_cls(last_spec["type"])
+                kw = {k: v for k, v in last_spec.items() if k not in {"type", "name", "trainable"}}
+                kw["return_sequences"] = True
+                if cls in (GRU, LSTM):
+                    kw.setdefault("activation", "sigmoid")
+                new_last_layer = cls(name=last_trunk_name + "_seq", **kw)
+                feat = new_last_layer(prev_trunk_output)
+
+                # Copy weights from loaded model's last trunk layer
+                new_last_layer.set_weights(last_trunk_layer.get_weights())
+                print(f"[MultiScenario] Copied weights from {last_trunk_name} to {last_trunk_name}_seq")
+            else:
+                # Standard path: reuse loaded trunk output directly
+                feat = last_trunk_layer.output
+
+            # Get old head weights for initializing new heads
+            old_head_weights = self._get_old_head_weights(prev)
+
+            print(f"[MultiScenario] Reusing computation graph from loaded model")
+            print(f"[MultiScenario] Feature extractor: {last_trunk_name}")
+        else:
+            # No transfer learning - build fresh (Step 1 only)
+            input_layer = input_layers
+            prepro = self.prepro_layers(input_layers, input_data)
+            expanded = [Reshape((self.ndays, 1))(t) for t in prepro]
+            x = Concatenate(axis=-1, name="stacked")(expanded)
+            feat = self._build_trunk(x)
+            old_head_weights = None
+
+        # Build heads on top of feature extractor
         outputs = {}
         head_tensors: Dict[str, tf.Tensor] = {}
+
         for spec in self.head_plan:
             if spec["kind"] != "dense":
                 continue
@@ -319,6 +345,7 @@ class MultiScenarioModelBuilder(ModelBuilder):
             outputs[spec["out_name"]] = pack["y_unscaled"]
             head_tensors[spec["head_id"]] = pack["y_unscaled"]
 
+        # Build contrast heads (subtract layers)
         for spec in self.head_plan:
             if spec["kind"] != "contrast":
                 continue
@@ -327,44 +354,46 @@ class MultiScenarioModelBuilder(ModelBuilder):
                 head_tensors[spec["neg_head"]],
             ])
 
-        ann = Model(inputs=input_layers, outputs=outputs, name="multi_scenario_model")
+        ann = Model(inputs=input_layer, outputs=outputs, name="multi_scenario_model")
 
-        prev = self._load_previous_model()
-        if prev is not None:
-            self._init_all_weights(prev, ann)
-            self._copy_preprocessing_layers(prev, ann) 
+        # Initialize head weights from previous model
+        if old_head_weights is not None:
+            ann.get_layer("head_base_scaled").set_weights(old_head_weights)
+            print("[weights] initialized head_base_scaled from previous model")
+            if self.init_targets_from_source:
+                for sc in self.scenarios_cfg:
+                    ann.get_layer(f"head_{sc['id']}_scaled").set_weights(old_head_weights)
+                    print(f"[weights] initialized head_{sc['id']}_scaled from previous model")
+
+        # Initialize branch weights from trunk if possible
+        if prev is not None and self.branch_layers and self.init_targets_from_source:
+            last_trunk_weights = last_trunk_layer.get_weights()
+            trunk_shapes = [w.shape for w in last_trunk_weights]
+            existing = {l.name for l in ann.layers}
+            for idx, spec in enumerate(self.branch_layers):
+                names = [spec.get("name", f"branch_{idx+1}")] + [self._branch_layer_name(spec, sc["id"], idx) for sc in self.scenarios_cfg]
+                for name in names:
+                    if name not in existing:
+                        continue
+                    layer = ann.get_layer(name)
+                    if [w.shape for w in layer.get_weights()] != trunk_shapes:
+                        raise ValueError(
+                            f"cannot seed branch {name} from trunk layer {last_trunk_name}: weight shapes "
+                            f"{[w.shape for w in layer.get_weights()]} vs {trunk_shapes}. A GRU kernel is "
+                            f"(input_dim, 3*units): the trunk layer sees the previous layer's width as input, "
+                            f"the branch sees the trunk's output width, so the copy only works when those widths "
+                            f"and the unit counts are equal (e.g. trunk [32, 32] with a 32-unit branch). Otherwise "
+                            f"the branch would start from random weights and the experiment would not test a "
+                            f"seeded branch.")
+                    layer.set_weights(last_trunk_weights)
+                    print(f"[weights] initialized {name} from {last_trunk_name}")
 
         self._apply_trainable_flags(ann)
 
         print(ann.summary())
         return ann
 
-    def pool_and_align_cases(self, dataframes: List[pd.DataFrame]) -> List[pd.DataFrame]:
-        if not dataframes or len(dataframes) < 1:
-            raise ValueError("pool_and_align_cases expects at least one DataFrame (Base).")
-
-        all_idx = (pd.concat([df[["case", "datetime"]] for df in dataframes]).drop_duplicates().sort_values(["case", "datetime"]))
-        aligned = [all_idx.merge(df, on=["case", "datetime"], how="left") for df in dataframes]
-        input_cols = list(self.input_names)
-        output_cols = list(self.output_names)
-
-        merged_inputs = aligned[0][["case", "datetime"] + input_cols].copy()
-        for df in aligned[1:]:
-            for col in input_cols:
-                if col in df.columns:
-                    merged_inputs[col] = merged_inputs[col].combine_first(df[col])
-
-        final = []
-        for i, df in enumerate(aligned):
-            out_df = merged_inputs.copy()
-            for col in output_cols:
-                out_df[col] = df[col] if col in df.columns else np.nan
-            for extra in ["model", "scene"]:
-                if extra in df.columns and extra not in out_df.columns:
-                    out_df[extra] = df[extra]
-            final.append(out_df)
-
-        return final
+    pool_and_align_cases = MultiStageModelBuilder.pool_and_align_cases
 
     def fit_model(
         self,
@@ -518,7 +547,8 @@ class MultiScenarioModelBuilder(ModelBuilder):
 
             train_y[spec["out_name"]] = contrast_train
             test_y[spec["out_name"]] = contrast_test
-            loss_dict[spec["out_name"]] = ScaledMaskedMAE(output_scales)
+            # loss_dict[spec["out_name"]] = ScaledMaskedMAE(output_scales)  # pre-A/B: contrast scaled by absolute station scales
+            loss_dict[spec["out_name"]] = ScaledMaskedMAE(self._contrast_loss_scales())
             metrics_dict[spec["out_name"]] = [masked_mae, masked_mse]
             loss_wts[spec["out_name"]] = float(spec["loss_weight"])
 

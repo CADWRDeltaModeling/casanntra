@@ -1,7 +1,7 @@
 from casanntra.read_data import read_data
 from casanntra.model_builder import *
 from casanntra.multi_stage_model_builder import *
-from casanntra.xvalid_multi import xvalid_fit_multi, bulk_fit
+from casanntra.xvalid_multi import xvalid_fit_multi, bulk_fit, _ordered_outputs
 from casanntra.tide_transforms import *
 from casanntra.scaling import (
     ModifiedExponentialDecayLayer,
@@ -20,36 +20,10 @@ from casanntra.single_or_list import single_or_list
 
 import glob
 
-try:
-    from casanntra.multi_scenario_model_builder import MultiScenarioModelBuilder
-except Exception:
-    MultiScenarioModelBuilder = None
+from casanntra.multi_scenario_model_builder import MultiScenarioModelBuilder
 
-model_builders = {"GRUBuilder2": GRUBuilder2, "MultiStageModelBuilder": MultiStageModelBuilder}
-
-if MultiScenarioModelBuilder is not None:
-    model_builders["MultiScenarioModelBuilder"] = MultiScenarioModelBuilder
-
-
-def _multi_scenario_tags(builder, count):
-    is_ms = getattr(builder, "is_multi_scenario_step", lambda: False)()
-    if not is_ms:
-        return [str(i) for i in range(count)]
-
-    try:
-        sc_cfg = builder.builder_args.get("scenarios", []) or []
-    except Exception:
-        sc_cfg = []
-
-    tags = ["base"] + [sc.get("id", f"scenario{i}") for i, sc in enumerate(sc_cfg, start=1)]
-    if len(tags) != count:
-        tags = ["base"] + [f"scenario{i}" for i in range(1, count)]
-    return tags
-
-
-def _ordered_outputs(builder, outputs):
-    tags = _multi_scenario_tags(builder, len(outputs))
-    return list(zip(outputs, tags))
+model_builders = {"GRUBuilder2": GRUBuilder2, "MultiStageModelBuilder": MultiStageModelBuilder,
+                  "MultiScenarioModelBuilder": MultiScenarioModelBuilder}
 
 
 def fit_from_config(
@@ -197,10 +171,6 @@ def fit_from_config(
 
         df_in = df_source_in
         df_out = [df_out, df_source_out]
-
-        # Guard against future builders that expect [base, scenario] ordering
-        if getattr(builder, "is_multi_scenario_step", lambda: False)():
-            df_out = [df_source_out, df_out[0]]
 
     else:
         df_in, df_out = builder.xvalid_time_folds(df, target_fold_length, split_in_out=True)
@@ -404,20 +374,4 @@ def verify_data_availability(source_data_prefix, target_data_prefix):
     
 
 def _is_multi_scenario_step(builder) -> bool:
-    """
-    Returns True when the builder is configured for a multi-scenario transfer step.
-    """
-    # Prefer explicit builder introspection when available
-    if hasattr(builder, "is_multi_scenario_step"):
-        try:
-            return bool(builder.is_multi_scenario_step())
-        except Exception:
-            pass
-
-    try:
-        scenarios = getattr(builder, "builder_args", {}).get("scenarios", None)
-    except Exception:
-        scenarios = None
-
-    requires_secondary = getattr(builder, "requires_secondary_data", lambda: False)()
-    return bool(requires_secondary and isinstance(scenarios, list) and len(scenarios) > 0)
+    return builder.is_multi_scenario_step()

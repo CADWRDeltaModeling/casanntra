@@ -33,11 +33,23 @@ class MultiStageModelBuilder(GRUBuilder2):
         print(self.transfer_type == "None")
 
         self.feature_spec = builder_args.get("feature_layers", [{"type": "GRU", "units": 32, "trainable": True}, {"type": "GRU", "units": 16, "trainable": True}])
-        self.heads_spec = builder_args.get("heads", None)
-        self.frozen_layer_names = [spec.get("name", f"feature_{idx+1}") for idx, spec in enumerate(self.feature_spec) if not spec.get("trainable", True)]
+
+        # Branch mode: duplicate the last feature layer per head (target/source)
+        # Only meaningful in contrastive mode; ignored otherwise
+        self.branch_last_layer = builder_args.get("branch_last_layer", False)
+
+
+        frozen_layer_names = [spec.get("name", f"feature_{idx+1}") for idx, spec in enumerate(self.feature_spec) if not spec.get("trainable", True)]
+        # If branching, expand frozen names to cover both branch copies
+        if self.branch_last_layer and self.transfer_type == "contrastive":
+            last_name = self.feature_spec[-1].get("name", f"feature_{len(self.feature_spec)}")
+            if last_name in frozen_layer_names:
+                frozen_layer_names.remove(last_name)
+                frozen_layer_names.extend([f"{last_name}_target", f"{last_name}_source"])
+        self.frozen_layer_names = frozen_layer_names
 
         if self.transfer_type is not None:
-            transfer_opts = ["direct", "contrastive"]
+            transfer_opts = ["direct", "contrastive", "multi-direct"]
             if self.transfer_type not in transfer_opts:
                 raise ValueError(
                     f"Transfer type {self.transfer_type} not in available options: {transfer_opts}")
@@ -45,8 +57,12 @@ class MultiStageModelBuilder(GRUBuilder2):
 
     def num_outputs(self):
         """Multi-output model: primary output + secondary ANN output"""
-        nout = 3 if self.transfer_type == "contrastive" else 1
-        return nout
+        if self.transfer_type == "contrastive":
+            return 3  # target + source + contrast
+        elif self.transfer_type == "multi-direct":
+            return 2  # target + source (no contrast)
+        else:
+            return 1  # direct: target only
 
     def build_model(self, input_layers, input_data):
         base_model = self.load_existing_model()
@@ -70,33 +86,133 @@ class MultiStageModelBuilder(GRUBuilder2):
             prepro_layers = self.prepro_layers(input_layers, input_data)
             expanded_inputs = [Reshape((self.ndays, 1))(tensor) for tensor in prepro_layers]
             x = Concatenate(axis=-1, name="stacked")(expanded_inputs)
-            feature_extractor = self._build_stack(x, self.feature_spec)
+            if self.branch_last_layer and self.transfer_type == "contrastive":
+                # Build trunk only — branch layers created in contrastive block below
+                feature_extractor = self._build_stack(x, self.feature_spec[:-1])
+            else:
+                feature_extractor = self._build_stack(x, self.feature_spec)
             input_layer = input_layers
+
         if self.transfer_type == "contrastive":
+            if self.branch_last_layer:
+                # --- Branched: trunk shared, last GRU duplicated per head ---
+                branch_spec = self.feature_spec[-1]
+                branch_name = branch_spec.get("name", f"feature_{len(self.feature_spec)}")
+
+                if base_model:
+                    # Trunk output = second-to-last feature layer
+                    trunk_name = self.feature_spec[-2].get("name", f"feature_{len(self.feature_spec)-1}")
+                    trunk_output = base_model.get_layer(trunk_name).output
+                    # Extract last GRU weights for branch initialization
+                    branch_init_weights = base_model.get_layer(branch_name).get_weights()
+                else:
+                    # From scratch: feature_extractor is already trunk-only
+                    trunk_output = feature_extractor
+                    branch_init_weights = None
+
+                # Create two branch copies of the last GRU layer
+                cls = self._layer_builder(branch_spec["type"])
+                kw = {k: v for k, v in branch_spec.items() if k not in {"type", "name", "trainable"}}
+                if cls in (layers.LSTM, layers.GRU):
+                    kw.setdefault("activation", "sigmoid")
+                    kw.setdefault("return_sequences", False)
+
+                branch_target = cls(**kw, name=f"{branch_name}_target")
+                branch_source = cls(**kw, name=f"{branch_name}_source")
+
+                feat_target = branch_target(trunk_output)
+                feat_source = branch_source(trunk_output)
+
+                # Initialize branches with pretrained weights
+                if branch_init_weights is not None:
+                    branch_target.set_weights(branch_init_weights)
+                    branch_source.set_weights(branch_init_weights)
+
+                # Dense heads off separate branches
+                out_target_layer = layers.Dense(units=len(self.output_names), activation="elu", name="target_scaled")
+                out_source_layer = layers.Dense(units=len(self.output_names), activation="elu", name="source_scaled")
+                out_target_scaled = out_target_layer(feat_target)
+                out_source_scaled = out_source_layer(feat_source)
+
+                if self.old_weights is not None:
+                    out_source_layer.set_weights(self.old_weights)
+                    out_target_layer.set_weights(self.old_weights)
+
+                output_scales = list(self.output_names.values())
+                out_target_unscaled = UnscaleLayer(output_scales, name="out_target_unscaled")(out_target_scaled)
+                out_source_unscaled = UnscaleLayer(output_scales, name="out_source_unscaled")(out_source_scaled)
+                out_contrast_unscaled = layers.Subtract(name="out_contrast_unscaled")([out_target_unscaled, out_source_unscaled])
+
+                ann = Model(inputs=input_layer, outputs={"out_target_unscaled": out_target_unscaled, "out_source_unscaled": out_source_unscaled, "out_contrast_unscaled": out_contrast_unscaled})
+                return ann
+
+            # --- Original shared contrastive (unchanged) ---
             out_target_layer = layers.Dense(units=len(self.output_names), activation="elu", name="target_scaled")
             out_source_layer = layers.Dense(units=len(self.output_names), activation="elu", name="source_scaled")
             out_target_scaled = out_target_layer(feature_extractor)
             out_source_scaled = out_source_layer(feature_extractor)
+
+            if self.old_weights is not None:
+                out_source_layer.set_weights(self.old_weights)
+                out_target_layer.set_weights(self.old_weights)
+
+            output_scales = list(self.output_names.values())
+            out_target_unscaled = UnscaleLayer(output_scales, name="out_target_unscaled")(out_target_scaled)
+            out_source_unscaled = UnscaleLayer(output_scales, name="out_source_unscaled")(out_source_scaled)
+
+            out_contrast_unscaled = layers.Subtract(name="out_contrast_unscaled")([out_target_unscaled, out_source_unscaled])
+            ann = Model(inputs=input_layer, outputs={"out_target_unscaled": out_target_unscaled, "out_source_unscaled": out_source_unscaled, "out_contrast_unscaled": out_contrast_unscaled})
+
+            return ann
+        
+        elif self.transfer_type == "multi-direct":
+            # Two heads (target + source) but NO contrast head
+            out_target_layer = layers.Dense(units=len(self.output_names), activation="elu", name="target_scaled")
+            out_source_layer = layers.Dense(units=len(self.output_names), activation="elu", name="source_scaled")
+            out_target_scaled = out_target_layer(feature_extractor)
+            out_source_scaled = out_source_layer(feature_extractor)
+
             if self.old_weights is not None:
                 out_source_layer.set_weights(self.old_weights)
                 out_target_layer.set_weights(self.old_weights)
             output_scales = list(self.output_names.values())
+
             out_target_unscaled = UnscaleLayer(output_scales, name="out_target_unscaled")(out_target_scaled)
             out_source_unscaled = UnscaleLayer(output_scales, name="out_source_unscaled")(out_source_scaled)
-            out_contrast_unscaled = layers.Subtract(name="out_contrast_unscaled")([out_target_unscaled, out_source_unscaled])
-            ann = Model(inputs=input_layer, outputs={"out_target_unscaled": out_target_unscaled, "out_source_unscaled": out_source_unscaled, "out_contrast_unscaled": out_contrast_unscaled})
+            ann = Model(inputs=input_layer, outputs={"out_target_unscaled": out_target_unscaled, "out_source_unscaled": out_source_unscaled})
+
             return ann
+        
         scaled_output = layers.Dense(len(self.output_names), activation="elu", name="out_scaled")(feature_extractor)
         unscaled_output = UnscaleLayer(list(self.output_names.values()), name="out_unscaled")(scaled_output)
         model = Model(inputs=input_layer, outputs={"out_unscaled": unscaled_output})
+
         if self.old_weights is not None:
             model.get_layer("out_scaled").set_weights(self.old_weights)
+
         return model
 
     def requires_secondary_data(self):
         """Returns True if transfer learning requires a second dataset."""
-        requires_2nd = self.transfer_type == "contrastive"
+        requires_2nd = self.transfer_type in ("contrastive", "multi-direct")
         return requires_2nd
+
+    def _contrast_loss_scales(self):
+        cs = self.builder_args.get("contrast_scales", None)
+        if cs is None:
+            return list(self.output_names.values())
+        missing = [st for st in self.output_names if st not in cs]
+        if missing:
+            raise ValueError(f"contrast_scales missing stations: {missing}")
+        return [float(cs[st]) for st in self.output_names]
+
+    def _apply_freeze(self, ann):
+        names = [spec.get("name", f"feature_{i+1}") for i, spec in enumerate(self.feature_spec)]
+        if self.branch_last_layer and self.transfer_type == "contrastive":
+            names = names[:-1] + [f"{names[-1]}_target", f"{names[-1]}_source"]
+        for layer in ann.layers:
+            if layer.name in names:
+                layer.trainable = layer.name not in self.frozen_layer_names
 
     def pool_and_align_cases(self, dataframes):
         """Aligns and pools multiple DataFrames so that they all contain the union of (case, datetime) combinations.
@@ -123,8 +239,7 @@ class MultiStageModelBuilder(GRUBuilder2):
         all_case_datetime = (
             pd.concat([df[["case", "datetime"]] for df in dataframes])
             .drop_duplicates()
-            .sort_values(["case", "datetime"])
-        )
+            .sort_values(["case", "datetime"]))
 
         aligned = [all_case_datetime.merge(df, on=["case", "datetime"], how="left") for df in dataframes]
 
@@ -172,6 +287,18 @@ class MultiStageModelBuilder(GRUBuilder2):
                 main_train_rate,
                 main_epochs,
             )
+        elif self.transfer_type == "multi-direct":
+            return self._fit_model_multi_direct(
+                ann,
+                fit_input,
+                fit_output,
+                test_input,
+                test_output,
+                init_train_rate,
+                init_epochs,
+                main_train_rate,
+                main_epochs)
+        
         else:
             return self._fit_model_direct(
                 ann,
@@ -182,8 +309,7 @@ class MultiStageModelBuilder(GRUBuilder2):
                 init_train_rate,
                 init_epochs,
                 main_train_rate,
-                main_epochs,
-            )
+                main_epochs)
 
     def _fit_model_contrastive(
         self,
@@ -195,8 +321,8 @@ class MultiStageModelBuilder(GRUBuilder2):
         init_train_rate,
         init_epochs,
         main_train_rate,
-        main_epochs,
-    ):
+        main_epochs):
+
         contrastive_target = fit_output[0] - fit_output[1]
         contrast_weight = self.contrast_weight if self.contrast_weight is not None else 1.0
         contrastive_target[np.isnan(fit_output[0]) | np.isnan(fit_output[1])] = np.nan
@@ -212,12 +338,9 @@ class MultiStageModelBuilder(GRUBuilder2):
             "out_contrast_unscaled": contrastive_test,
         }
         test_y["out_contrast_unscaled"][
-            np.isnan(test_output[0]) | np.isnan(test_output[1])
-        ] = np.nan
+            np.isnan(test_output[0]) | np.isnan(test_output[1])] = np.nan
 
-        for layer in ann.layers:
-            if layer.name in self.frozen_layer_names:
-                layer.trainable = False
+        self._apply_freeze(ann)
 
         output_scales = list(self.output_names.values())
         ann.compile(
@@ -226,17 +349,96 @@ class MultiStageModelBuilder(GRUBuilder2):
             loss={
                 "out_target_unscaled": ScaledMaskedMAE(output_scales),
                 "out_source_unscaled": ScaledMaskedMAE(output_scales),
-                "out_contrast_unscaled": ScaledMaskedMAE(output_scales),
+                "out_contrast_unscaled": ScaledMaskedMAE(self._contrast_loss_scales())},
+
+            loss_weights={
+                "out_target_unscaled": 1.0,
+                "out_source_unscaled": 1.0,
+                "out_contrast_unscaled": contrast_weight},
+
+            metrics={
+                "out_target_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
+                "out_source_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
+                "out_contrast_unscaled": [masked_mae, masked_mse]})
+        
+        history = ann.fit(
+            fit_input,
+            train_y,
+            epochs=init_epochs,
+            batch_size=64,
+            validation_data=(test_input, test_y),
+            verbose=2,
+            shuffle=True)
+        
+        if main_epochs and main_epochs > 0:
+            ann.compile(
+                optimizer=tf.keras.optimizers.Adamax(learning_rate=main_train_rate, clipnorm=0.5),
+                run_eagerly=False,
+                loss={
+                    "out_target_unscaled": ScaledMaskedMAE(output_scales),
+                    "out_source_unscaled": ScaledMaskedMAE(output_scales),
+                    "out_contrast_unscaled": ScaledMaskedMAE(self._contrast_loss_scales()),
+                },
+                loss_weights={
+                    "out_target_unscaled": 1.0,
+                    "out_source_unscaled": 1.0,
+                    "out_contrast_unscaled": contrast_weight,
+                },
+                metrics={
+                    "out_target_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
+                    "out_source_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
+                    "out_contrast_unscaled": [masked_mae, masked_mse],
+                },
+            )
+            history = ann.fit(
+                fit_input,
+                train_y,
+                epochs=main_epochs,
+                batch_size=64,
+                validation_data=(test_input, test_y),
+                verbose=2,
+                shuffle=True,
+            )
+        return history, ann
+
+    def _fit_model_multi_direct(
+        self,
+        ann,
+        fit_input,
+        fit_output,
+        test_input,
+        test_output,
+        init_train_rate,
+        init_epochs,
+        main_train_rate,
+        main_epochs):
+        """Multi-direct: two heads (target + source) but NO contrast loss."""
+        train_y = {
+            "out_target_unscaled": fit_output[0],
+            "out_source_unscaled": fit_output[1],
+        }
+        test_y = {
+            "out_target_unscaled": test_output[0],
+            "out_source_unscaled": test_output[1],
+        }
+
+        self._apply_freeze(ann)
+
+        output_scales = list(self.output_names.values())
+        ann.compile(
+            optimizer=tf.keras.optimizers.Adamax(learning_rate=init_train_rate, clipnorm=0.5),
+            run_eagerly=False,
+            loss={
+                "out_target_unscaled": ScaledMaskedMAE(output_scales),
+                "out_source_unscaled": ScaledMaskedMAE(output_scales),
             },
             loss_weights={
                 "out_target_unscaled": 1.0,
                 "out_source_unscaled": 1.0,
-                "out_contrast_unscaled": contrast_weight,
             },
             metrics={
                 "out_target_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
                 "out_source_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
-                "out_contrast_unscaled": [masked_mae, masked_mse],
             },
         )
         history = ann.fit(
@@ -255,17 +457,14 @@ class MultiStageModelBuilder(GRUBuilder2):
                 loss={
                     "out_target_unscaled": ScaledMaskedMAE(output_scales),
                     "out_source_unscaled": ScaledMaskedMAE(output_scales),
-                    "out_contrast_unscaled": ScaledMaskedMAE(output_scales),
                 },
                 loss_weights={
                     "out_target_unscaled": 1.0,
                     "out_source_unscaled": 1.0,
-                    "out_contrast_unscaled": contrast_weight,
                 },
                 metrics={
                     "out_target_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
                     "out_source_unscaled": [ScaledMaskedMAE(output_scales), ScaledMaskedMSE(output_scales)],
-                    "out_contrast_unscaled": [masked_mae, masked_mse],
                 },
             )
             history = ann.fit(

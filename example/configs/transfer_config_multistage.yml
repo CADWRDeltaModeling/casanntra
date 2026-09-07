@@ -1,7 +1,5 @@
 # ===========================
-# TRANSFER LEARNING CONFIGURATION FILE
-# ===========================
-# Each step builds upon the previous one in a staged‑learning pipeline.
+# TRANSFER LEARNING CONFIGURATION FILE (v3 – look‑back experiments, new structure)
 # ===========================
 
 output_dir: "./output"      # Directory for saving output files
@@ -9,7 +7,7 @@ output_dir: "./output"      # Directory for saving output files
 model_builder_config:
   builder_name: MultiStageModelBuilder
   args:
-    input_names:           
+    input_names:
       - northern_flow
       - exports
       - sjr_flow
@@ -18,11 +16,13 @@ model_builder_config:
       - sf_tidal_filter
       - dcc
       - smscg
-    output_names:          
+    output_names:
       x2: 100.0
-      # mrz: 30000.0
+      mrz: 30000.0
       pct: 20000.0
       mal: 15000.0
+      god: 12000.0
+      vol: 12000.0
       gzl: 20000.0
       bdl: 14000.0
       nsl2: 12000.0
@@ -33,13 +33,13 @@ model_builder_config:
       jer: 3000.0
       sal: 1200.0
       frk: 2500.0
-      # srv: 1200.0
+      srv: 1200.0
       bac: 1500.0
       rsl: 1500.0
       oh4: 1200.0
       # wci: 1200.0
-      trp: 1200.0
-    ndays: 90           
+      # trp: 1200.0
+    ndays: 105
 
 # ===========================
 # TRAINING STEPS
@@ -59,13 +59,13 @@ steps:
   init_train_rate: 0.008
   init_epochs: 10
   main_train_rate: 0.001
-  main_epochs: 100       
+  main_epochs: 100
   builder_args:
     transfer_type: None
     ann_output_name: dsm2_base
-    feature_layers:
-      - {type: GRU, units: 32, name: lay1}
-      - {type: GRU, units: 16, name: lay2}
+    feature_layers:                    # dummy – grid‑search overwrites
+      - {type: GRU, units: 32, name: lay1, return_sequences: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false}
 
 # --------------------------------------------------------------
 - name: dsm2.schism
@@ -80,14 +80,14 @@ steps:
   init_train_rate: 0.003
   init_epochs: 10
   main_train_rate: 0.001
-  main_epochs: 100
+  main_epochs: 35
   builder_args:
     transfer_type: direct
     save_modified_orig_model_fname: null
-    ann_output_name: schsim_base
-    feature_layers:
-      - {type: GRU, units: 32, name: lay1, trainable: true}
-      - {type: GRU, units: 16, name: lay2, trainable: true}
+    ann_output_name: schism_base
+    feature_layers:                    # dummy – grid‑search overwrites
+      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
 
 # --------------------------------------------------------------
 - name: base.suisun
@@ -99,23 +99,24 @@ steps:
   pool_size: 12
   pool_aggregation: false
   target_fold_length: 180d
-  init_train_rate: 0.003
-  init_epochs: 10          
-  main_train_rate: 0.001  
-  main_epochs: 35        
+  init_train_rate: 0.001
+  init_epochs: 10
+  main_train_rate: 0.0005
+  main_epochs: 36
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
-    transfer_type: contrastive
+    source_input_mask_regex: [schism_base_2021.csv]
+    transfer_type: contrastive  # V11: Dense contrast head experiment
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-suisun_gru2
-    feature_layers:
-      - {type: GRU, units: 32, name: lay1, trainable: true}
-      - {type: GRU, units: 16, name: lay2, trainable: true}
+    feature_layers:                    # dummy – grid‑search overwrites & freezes
+      - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+      - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
+
 
 # --------------------------------------------------------------
 - name: base.slr
-  input_prefix: schism_slr
+  input_prefix: schism_slr_base
   input_mask_regex: null
   output_prefix: "{output_dir}/schism_base.slr_gru2"
   save_model_fname: "{output_dir}/schism_base.slr_gru2"
@@ -124,18 +125,18 @@ steps:
   pool_aggregation: false
   target_fold_length: 180d
   init_train_rate: 0.001
-  init_epochs: 12
+  init_epochs: 10
   main_train_rate: 0.0005
-  main_epochs: 62
+  main_epochs: 36
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
-    transfer_type: contrastive
+    source_input_mask_regex: [schism_base_2021.csv]
+    transfer_type: multi-direct  # V9: back to multi-direct for fair comparison with V6
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-slr_gru2
     feature_layers:
-      - {type: GRU, units: 32, name: lay1, trainable: true}
-      - {type: GRU, units: 16, name: lay2, trainable: true}
+      - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+      - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
 
 # --------------------------------------------------------------
 - name: base.cache
@@ -148,22 +149,22 @@ steps:
   pool_aggregation: false
   target_fold_length: 180d
   init_train_rate: 0.001
-  init_epochs: 12
+  init_epochs: 10
   main_train_rate: 0.0005
-  main_epochs: 62
+  main_epochs: 36
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
-    transfer_type: contrastive
+    source_input_mask_regex: [schism_base_2021.csv]
+    transfer_type: multi-direct  # V9: back to multi-direct for fair comparison with V6
     contrast_weight: 0.5
-    save_modified_orig_model_fname: schism_base-slr_gru2     
+    save_modified_orig_model_fname: schism_base-cache_gru2
     feature_layers:
-      - {type: GRU, units: 32, name: lay1, trainable: true}
-      - {type: GRU, units: 16, name: lay2, trainable: true}
+      - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+      - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
 
 # --------------------------------------------------------------
 - name: base.franks
-  input_prefix: schism_franks
+  input_prefix: schism_ft
   input_mask_regex: null
   output_prefix: "{output_dir}/schism_base.franks_gru2"
   save_model_fname: "{output_dir}/schism_base.franks_gru2"
@@ -172,15 +173,15 @@ steps:
   pool_aggregation: false
   target_fold_length: 180d
   init_train_rate: 0.001
-  init_epochs: 12
+  init_epochs: 10
   main_train_rate: 0.0005
-  main_epochs: 62
+  main_epochs: 36
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
-    transfer_type: contrastive
+    source_input_mask_regex: [schism_base_2021.csv]
+    transfer_type: multi-direct  # V9: back to multi-direct for fair comparison with V6
     contrast_weight: 0.5
-    save_modified_orig_model_fname: schism_base-slr_gru2     
+    save_modified_orig_model_fname: schism_base-franks_gru2
     feature_layers:
-      - {type: GRU, units: 32, name: feature1, trainable: true}
-      - {type: GRU, units: 16, name: feature2, trainable: true}
+      - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
+      - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
