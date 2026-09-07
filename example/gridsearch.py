@@ -1,31 +1,22 @@
 """Single gridsearch driver for both builders.
 
-    python gridsearch.py experiments/<spec>.py          START_TRIAL=<n> to resume
+Usage: python gridsearch.py experiments/<spec>.py (set START_TRIAL=<n> to resume a run).
 
-A spec file defines
-    VERSION           run id; outputs go to runs/<VERSION>/ (refused if it exists unless
-                      START_TRIAL > 1, which resumes)
-    CONFIG            YAML template filename in configs/
-    STEPS             step names to run, in order; each loads the previous run step's saved
-                      model, the first loads nothing
-    GRID              {key: [values]}; one trial per combination. Keys:
-        layers        layer specs (feature_layers for MSTAGE, trunk/base layers for MSCEN)
-        freeze        per run step, number of leading layers frozen
-        schedule      {step_name: (init_lr, main_lr, init_epochs, main_epochs)}
-        ndays, contrast_weight, repeat
-        MSCEN only    source_weight, target_weight, per_scenario_branch, branch_layers,
-                      use_contrast_scales
-        MSTAGE only   transfer_type (override for the last run step)
-    CONTRAST_SCALES   optional {station: scale}, used when use_contrast_scales is True
+A spec file defines VERSION (run id; outputs go to runs/<VERSION>/, refused if it exists unless
+START_TRIAL > 1), CONFIG (YAML filename in configs/), STEPS (step names to run in order; each
+loads the previous run step's saved model, the first loads nothing), GRID ({key: [values]}, one
+trial per combination) and optionally CONTRAST_SCALES ({station: scale}, used when
+use_contrast_scales is True).
 
-Layout of runs/<VERSION>/: master.csv, provenance.txt, spec.py, then per trial
-    Trial<n>/config_<step>.yml, metrics.csv, models/, xvalid/, plots/<head>/
+GRID keys: layers (feature_layers for MSTAGE, trunk/base layers for MSCEN), freeze (per run step,
+number of leading layers frozen), schedule ({step_name: (init_lr, main_lr, init_epochs,
+main_epochs)}), ndays, contrast_weight, repeat. MSCEN only: source_weight, target_weight,
+per_scenario_branch, branch_layers, use_contrast_scales. MSTAGE only: transfer_type (override for
+the last run step).
 
-xvalid file names, as written by staged_learning / xvalid_multi:
-    direct                    {prefix}_xvalid.csv        ref _xvalid_ref_out_unscaled.csv
-    contrastive, multi-direct {prefix}_xvalid_0.csv      ref _xvalid_ref_out_unscaled.csv
-                              {prefix}_xvalid_1.csv      ref _xvalid_ref_out_secondary_unscaled.csv
-    multi-scenario, per tag   {prefix}_xvalid_{tag}.csv  ref _xvalid_ref_out_{tag}_unscaled.csv
+runs/<VERSION>/ holds master.csv, provenance.txt, spec.py and per trial Trial<n>/ with
+config_<step>.yml, metrics.csv, models/, xvalid/ and plots/<head>/. The xvalid filename
+conventions written by staged_learning and xvalid_multi are in metrics.py.
 """
 import copy, importlib.util, itertools, json, os, shutil, socket, subprocess, sys, traceback
 from datetime import datetime
@@ -157,7 +148,7 @@ def plot_cases(df, station, label, out_dir, n_cases=7):
         sub = df[df["case"] == case_id]
         ax.plot(sub["datetime"], pd.to_numeric(sub[station], errors="coerce"), label="Ref")
         ax.plot(sub["datetime"], pd.to_numeric(sub[pred], errors="coerce"), label="ANN")
-        ax.set_title(f"[{label}]  station={station}  case={case_id}")
+        ax.set_title(f"[{label}] station={station} case={case_id}")
     axes[0, 0].legend()
     plt.savefig(out_dir / f"{label}_{station}.png", dpi=150)
     plt.close(fig)

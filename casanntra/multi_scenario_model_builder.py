@@ -130,7 +130,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
             builder="branch" if use_base_branch else "shared",
             dense_name="head_base_scaled"))
 
-        # direct: base only, contrastive/multi-direct: base + scenarios
         if self.transfer_type not in ("contrastive", "multi-direct") or len(self.scenarios_cfg) == 0:
             return plan
 
@@ -145,7 +144,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
                 loss_weight=tgt_w,
                 builder="branch" if use_branch else "shared",
                 dense_name=f"head_{sid}_scaled"))
-            # Only add contrast heads for contrastive mode (not multi-direct)
             if self.transfer_type == "contrastive":
                 ctr_w = float(sc.get("contrast_weight", self.contrast_weight_default))
                 plan.append(self._contrast_spec(
@@ -269,18 +267,14 @@ class MultiScenarioModelBuilder(ModelBuilder):
         raise ValueError(f"loaded model has no head layer among {possible_names}")
 
     def build_model(self, input_layers, input_data):
-        # Load previous model FIRST (like MSTAGE approach)
         prev = self._load_previous_model()
 
         if prev is not None:
-            # REUSE loaded model's computation graph (MSTAGE approach)
-            # This preserves all internal layer state exactly
             if isinstance(prev.input, list):
                 input_layer = {layer.name: layer for layer in prev.input}
             else:
                 input_layer = prev.input
 
-            # Check if recurrent branches need full sequences from trunk
             has_recurrent_branch = (
                 self.branch_layers
                 and any(self._layer_cls(bl["type"]) in (GRU, LSTM)
@@ -292,9 +286,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
             last_trunk_layer = prev.get_layer(last_trunk_name)
 
             if has_recurrent_branch and not last_trunk_layer.return_sequences:
-                # Rebuild last trunk layer with return_sequences=True so
-                # recurrent branches receive the full temporal sequence.
-                # GRU weights are independent of return_sequences.
                 print(f"[MultiScenario] Rebuilding {last_trunk_name} with return_sequences=True for recurrent branches")
 
                 if len(self.trunk_spec) > 1:
@@ -312,20 +303,16 @@ class MultiScenarioModelBuilder(ModelBuilder):
                 new_last_layer = cls(name=last_trunk_name + "_seq", **kw)
                 feat = new_last_layer(prev_trunk_output)
 
-                # Copy weights from loaded model's last trunk layer
                 new_last_layer.set_weights(last_trunk_layer.get_weights())
                 print(f"[MultiScenario] Copied weights from {last_trunk_name} to {last_trunk_name}_seq")
             else:
-                # Standard path: reuse loaded trunk output directly
                 feat = last_trunk_layer.output
 
-            # Get old head weights for initializing new heads
             old_head_weights = self._get_old_head_weights(prev)
 
             print(f"[MultiScenario] Reusing computation graph from loaded model")
             print(f"[MultiScenario] Feature extractor: {last_trunk_name}")
         else:
-            # No transfer learning - build fresh (Step 1 only)
             input_layer = input_layers
             prepro = self.prepro_layers(input_layers, input_data)
             expanded = [Reshape((self.ndays, 1))(t) for t in prepro]
@@ -333,7 +320,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
             feat = self._build_trunk(x)
             old_head_weights = None
 
-        # Build heads on top of feature extractor
         outputs = {}
         head_tensors: Dict[str, tf.Tensor] = {}
 
@@ -345,7 +331,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
             outputs[spec["out_name"]] = pack["y_unscaled"]
             head_tensors[spec["head_id"]] = pack["y_unscaled"]
 
-        # Build contrast heads (subtract layers)
         for spec in self.head_plan:
             if spec["kind"] != "contrast":
                 continue
@@ -356,7 +341,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
 
         ann = Model(inputs=input_layer, outputs=outputs, name="multi_scenario_model")
 
-        # Initialize head weights from previous model
         if old_head_weights is not None:
             ann.get_layer("head_base_scaled").set_weights(old_head_weights)
             print("[weights] initialized head_base_scaled from previous model")
@@ -365,7 +349,6 @@ class MultiScenarioModelBuilder(ModelBuilder):
                     ann.get_layer(f"head_{sc['id']}_scaled").set_weights(old_head_weights)
                     print(f"[weights] initialized head_{sc['id']}_scaled from previous model")
 
-        # Initialize branch weights from trunk if possible
         if prev is not None and self.branch_layers and self.init_targets_from_source:
             last_trunk_weights = last_trunk_layer.get_weights()
             trunk_shapes = [w.shape for w in last_trunk_weights]

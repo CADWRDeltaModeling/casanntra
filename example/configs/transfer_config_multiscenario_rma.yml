@@ -36,7 +36,6 @@ model_builder_config:
     ndays: 105
 
 steps:
-# --- Step 1: DSM2 pretraining ---
 - name: dsm2_base
   input_prefix: dsm2_base
   input_mask_regex: [dsm2_base_historical.csv, dsm2_base_calsim.csv]
@@ -60,7 +59,6 @@ steps:
     include_source_branch: false
     head_activation: elu
 
-# --- Step 2: Transfer to RMA base (direct, single-task) ---
 - name: dsm2.rma
   input_prefix: rma_base
   input_mask_regex: null
@@ -84,7 +82,6 @@ steps:
     include_source_branch: false
     head_activation: elu
 
-# --- Step 3: Multi-scenario joint training (base + scenarios) ---
 - name: base.multi
   input_prefix: rma_base
   input_mask_regex: null
@@ -114,7 +111,3 @@ steps:
     scenarios:
       - id: suisun
         input_prefix: rma_suisun
-      # - id: cache
-      #   input_prefix: rma_cache
-      # - id: ft
-      #   input_prefix: rma_ft

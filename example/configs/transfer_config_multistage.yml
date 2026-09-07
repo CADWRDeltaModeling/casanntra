@@ -1,8 +1,4 @@
-# ===========================
-# TRANSFER LEARNING CONFIGURATION FILE (v3 – look‑back experiments, new structure)
-# ===========================
-
-output_dir: "./output"      # Directory for saving output files
+output_dir: "./output"
 
 model_builder_config:
   builder_name: MultiStageModelBuilder
@@ -37,16 +33,9 @@ model_builder_config:
       bac: 1500.0
       rsl: 1500.0
       oh4: 1200.0
-      # wci: 1200.0
-      # trp: 1200.0
     ndays: 105
 
-# ===========================
-# TRAINING STEPS
-# ===========================
-
 steps:
-# --------------------------------------------------------------
 - name: dsm2_base
   input_prefix: dsm2_base
   input_mask_regex: [dsm2_base_historical\.csv, dsm2_base_calsim\.csv]
@@ -63,11 +52,10 @@ steps:
   builder_args:
     transfer_type: None
     ann_output_name: dsm2_base
-    feature_layers:                    # dummy – grid‑search overwrites
+    feature_layers:
       - {type: GRU, units: 32, name: lay1, return_sequences: true}
       - {type: GRU, units: 16, name: lay2, return_sequences: false}
 
-# --------------------------------------------------------------
 - name: dsm2.schism
   input_prefix: schism_base
   input_mask_regex: null
@@ -85,11 +73,10 @@ steps:
     transfer_type: direct
     save_modified_orig_model_fname: null
     ann_output_name: schism_base
-    feature_layers:                    # dummy – grid‑search overwrites
+    feature_layers:
       - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
       - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
 
-# --------------------------------------------------------------
 - name: base.suisun
   input_prefix: schism_suisun
   input_mask_regex: null
@@ -106,15 +93,13 @@ steps:
   builder_args:
     source_data_prefix: schism_base
     source_input_mask_regex: [schism_base_2021.csv]
-    transfer_type: contrastive  # V11: Dense contrast head experiment
+    transfer_type: contrastive
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-suisun_gru2
-    feature_layers:                    # dummy – grid‑search overwrites & freezes
+    feature_layers:
       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
       - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
 
-
-# --------------------------------------------------------------
 - name: base.slr
   input_prefix: schism_slr_base
   input_mask_regex: null
@@ -131,14 +116,13 @@ steps:
   builder_args:
     source_data_prefix: schism_base
     source_input_mask_regex: [schism_base_2021.csv]
-    transfer_type: multi-direct  # V9: back to multi-direct for fair comparison with V6
+    transfer_type: multi-direct
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-slr_gru2
     feature_layers:
       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
       - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
 
-# --------------------------------------------------------------
 - name: base.cache
   input_prefix: schism_cache
   input_mask_regex: null
@@ -155,14 +139,13 @@ steps:
   builder_args:
     source_data_prefix: schism_base
     source_input_mask_regex: [schism_base_2021.csv]
-    transfer_type: multi-direct  # V9: back to multi-direct for fair comparison with V6
+    transfer_type: multi-direct
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-cache_gru2
     feature_layers:
       - {type: GRU, units: 32, name: lay1, trainable: true, return_sequences: true}
       - {type: GRU, units: 16, name: lay2, trainable: true, return_sequences: false}
 
-# --------------------------------------------------------------
 - name: base.franks
   input_prefix: schism_ft
   input_mask_regex: null
@@ -179,7 +162,7 @@ steps:
   builder_args:
     source_data_prefix: schism_base
     source_input_mask_regex: [schism_base_2021.csv]
-    transfer_type: multi-direct  # V9: back to multi-direct for fair comparison with V6
+    transfer_type: multi-direct
     contrast_weight: 0.5
     save_modified_orig_model_fname: schism_base-franks_gru2
     feature_layers:

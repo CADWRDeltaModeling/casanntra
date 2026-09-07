@@ -1,7 +1,13 @@
-# Casanntra: Staged ANN Training for Simulation Model Surrogates
+# Casanntra
 
-## Overview
-**Casanntra** is a utility designed for training surrogate models based on simulation outputs, with a primary focus on hydrodynamic and water quality models of the Bay-Delta system. The package supports **transfer learning** across a sequence of models and is structured around **deliberate design of experiments** for input cases. This approach enables more efficient learning, especially when high-dimensional models have limited training data. The library and its constituent data were developed jointly by DWR and Resource Management Associates (RMA) in a project funded and administered by the Delta Science Program. The full toolkit includes CalSim itself, the [calsurrogate](https://github.com/CADWRDeltaModeling/calsurrogate) library that allows the incorporation of a variety of surrogates into CalSim and an associated [test problem ](https://github.com/CADWRDeltaModeling/calsurrogate-test). The workflow and relationship between these components is approximated below. 
+Casanntra trains neural network surrogates of Bay-Delta hydrodynamic and water quality
+models (DSM2, SCHISM, RMA) for use inside CalSim. Training is staged: a model is first fit
+to the large DSM2 dataset, then transferred to the smaller SCHISM or RMA datasets, then to
+scenario variants of those models (Suisun Marsh, sea level rise, Cache Slough, Franks Tract).
+The library and its data were developed by DWR and Resource Management Associates in a
+project funded by the Delta Science Program. Trained models are consumed by the
+[calsurrogate](https://github.com/CADWRDeltaModeling/calsurrogate) Java library.
+
 ```mermaid
 
 %%{init: { "themeVariables": { "fontSize": "24px" } }}%%
@@ -31,77 +37,98 @@ flowchart LR
     wresl ---> calsur
     end
 
-```	
+```
 
-## Core Concepts
-### Data Model Terminology
-- **Model**: In the input data, the model refers to the process-based model exercised when producing the file. This is the training target. During transfer learning we use the terms "source" and "target".
-- **Scene**: A collection of time-series data associated with a specific case, forming the input-output structure for training. For instance a very important case in Bay-Delta hydrodynamic modeling is the "base" case representing current conditions.
-- **Case**: A distinct configuration of input conditions, typically representing a specific set of boundary conditions or forcing parameters in the simulation model. A given year may be represented by many cases each with a different perturbation. A case is the way we represent design of experiments (DOE).
-- **Cross-validation**: A strategy to maximize data utility by dividing cases into training and validation sets while ensuring temporal and case-based consistency. In cross-validation a `fold` is witheld.
+## Terminology
 
-Further discussion of data inputs/outputs and sign conventions are discussed [here](data/readme.md). 
+- Model: the process model that produced a data file (DSM2, SCHISM, RMA). During transfer
+  learning the previous model is the source and the new one the target.
+- Case: one configuration of boundary conditions and operations. Cases implement the design
+  of experiments; a given year appears in many cases with different perturbations.
+- Scenario: a physical modification of the system (for example Suisun Marsh restoration),
+  run with the same inputs as the base case so that the difference isolates the modification.
+- Fold: cross-validation unit. Cases are split into folds of roughly 180 days so that no
+  case and no lag history spans a fold boundary.
 
-## Cross-Validation
-Higher-dimensional models often have limited training data due to computational constraints. To effectively assess model generalization, **K-fold cross-validation** is applied, ensuring:
-- Cases remain intact across folds.
-- A **target duration** is maintained, ensuring the trained ANN learns meaningful temporal patterns. Because training data tends to include histories of data (90 past days typical), cases and folds and histories have to be managed together so that we don't mix data from different cases.
-- The folds are currently run using multiprocessing on concurrent futures. Someone with experience in TensorFlow might be able to come up with a distributed strategy in TF that still preserves the folding strategy. 
+Data conventions and the input and output columns are described in [data/readme.md](data/readme.md).
 
-## Input Normalization and Scaling
-Casanntra applies **feature normalization and scaling** to inputs and outputs to improve training stability. This includes:
-- Standardization (zero mean, unit variance) where appropriate.
-- Min-max scaling for bounded variables.
-- Transformations to make up for poor gradients and near-saturation, which are inherant in the Bay-Delta system on the larger rivers. Our rivers fluctuate to high flows (300,000cfs) which is an order of magnitude higher than the level that elicits salinity responses. See the `scaling.py` folder. This should become configurable in the near future.
-- Ensuring consistent transformations between base and transfer learning scenarios.
+## Model
 
-## Transfer Learning Strategies
-Casanntra implements multiple flavors of **transfer learning**, enabling surrogate models to adapt efficiently across different levels of model fidelity:
+Inputs are daily time series (flows, exports, consumptive use, tidal energy, gate
+operations) with a 105 day history. Large river flows are compressed with a modified
+exponential decay before the network; other inputs are normalized. Two GRU layers feed
+one dense head per output station. Outputs are trained in scaled units and unscaled
+inside the saved model, so CalSim receives EC in micromhos per centimeter and X2 in
+kilometers.
 
-### Direct Transfer Learning
-- This is a straightforward continuation of training from a base model.
-- The pre-trained model is used as a starting point, with training continuing directly on the target data.
+Transfer between models works in three ways, selected per step in the YAML config:
 
-### Contrastive Transfer Learning
-- Introduces both a **source model** and a **target model**.
-- Both models are revised simultaneously, balancing error across their respective objectives.
-- This method ensures that shared structures between models are reinforced while allowing each model to refine its domain-specific details.
+- direct: continue training the previous model on the new data
+- contrastive: one trunk, one head per model, plus a head for the difference between them
+- multi-scenario: one trunk, one head for the base model and one per scenario, with a
+  difference head for each scenario
 
-### Difference-Based Transfer Learning
-- Focuses on adjusting the target model without modifying the source model.
-- Optimizes the surrogate model not only for the target scenario but also for accurately representing the differences between the source and target cases.
-- This approach is still under development and not fully implemented.
+Freezing lower layers and restarting with a low learning rate are configurable per step.
+Each step runs an initial phase and a main phase with their own learning rates and epochs.
 
-Each of these methods applies a combination of **"freezing" and restarting with low learning rates** to control model updates effectively. As part of this abstraction, each step in the training sequence consists of an **initial phase** and a **main phase**, ensuring stability and gradual adaptation to the new data.
+## Running experiments
 
+```
+conda env create -f environment.yml
+conda activate casanntra
+pip install -e .
+cd example
+python gridsearch.py experiments/smoke_test.py
+```
 
-## Postprocessing: Export and Conversion to Native Units
-The trained neural network models in this framework are stored in **scaled units** for numerical stability during training. However, when deploying models for real-world applications or integrating with external frameworks (e.g., Java-based systems, TensorFlow Serving for CalSim), it is often necessary to convert the model outputs back to **native physical units**. This section outlines the procedures for:
-- **Wrapping trained models** with an `UnscaleLayer` to restore outputs to native units.
-- **Exporting trained models** from `.h5` to TensorFlow’s **SavedModel (`.pb`) format**.
-- **Checking model predictions** after conversion.
+The smoke test runs the full pipeline on a tiny network in about five minutes. A real run
+is the same command with another spec from `example/experiments/`. A spec names a YAML in
+`example/configs/`, the steps to run, and the hyperparameter grid; every combination
+becomes one trial. Outputs go to `runs/<VERSION>/`:
 
-### Exporting a Model with Native Units
-These two tasks are done with a utility. The `UnscaleLayer` applies the inverse scaling transformation to produce **real-world values** at inference time, such as micromhos/cm specific conductance or an X2 value in kilometers.
+```
+runs/<VERSION>/
+  master.csv         one row per trial with mean NSE per head and the grid values
+  provenance.txt     start time, host, git commit and working tree diff
+  spec.py            copy of the spec
+  Trial1/
+    config_<step>.yml
+    metrics.csv      NSE, r, MAE, RMSE per station and head
+    models/          saved model per step (.h5 and .weights.h5)
+    xvalid/          cross-validated predictions and reference outputs
+    plots/
+```
 
-#### **Conversion Process: H5 → TF SavedModel Format**
-To convert an `.h5` model into **TensorFlow’s SavedModel format**, follow these steps:
-1. **Find the trained model (`.h5`) and YAML config (`.yml`) used in training.**
-2. **Run the conversion script**:
-   ```bash
-   python convert_and_validate.py transfer_config.yml my_trained_model.h5 my_input_data.csv
+The driver refuses to overwrite an existing run. Set `START_TRIAL=<n>` to resume one.
 
+## Exporting a model for CalSim
 
-## Next Steps
-- **Expand documentation** to include example workflows.
-- **Provide visualizations** demonstrating case divisions and cross-validation splits.
-- **Optimize transfer learning workflows** for different model architectures.
+```
+python -m casanntra.model_conversion <config.yml> <model.h5> <inputs.csv> <head>
+```
 
-This README follows **Markdown (.md) format** to facilitate version control and GitHub compatibility.
+This wraps the model with the unscaling layer, writes a TensorFlow SavedModel, and checks
+its predictions on the given input file. Interoperability conventions are in the
+[wiki](https://github.com/CADWRDeltaModeling/casanntra/wiki).
 
+## Layout
 
-See also
-https://github.com/CADWRDeltaModeling/calsurrogate
+```
+casanntra/    library: data reading, cross-validation, model builders, staged training, export
+data/         training data, one CSV per model and case
+example/      gridsearch driver, configs, experiment specs
+tests/
+```
 
-Interoperability standards are in the wiki:
-https://github.com/CADWRDeltaModeling/casanntra/wiki
+## Credits
+
+Developed at the California Department of Water Resources, Delta Modeling Section, with
+Resource Management Associates, in a project funded and administered by the Delta Science
+Program.
+
+- Eli Ateljevich (DWR): design, core library, cross-validation and staged training
+- Lily Tomkovic (DWR): model runs, training data
+- Ryan Ripken (RMA): RMA model runs, CalSim integration
+- Can Ruso (UC Berkeley): multi-scenario training, contrast loss, experiment driver
+
+MIT license, copyright 2024 Eli Ateljevich.
