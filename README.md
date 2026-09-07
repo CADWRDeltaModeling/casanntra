@@ -129,6 +129,6 @@ Program.
 - Eli Ateljevich (DWR): design, core library, cross-validation and staged training
 - Lily Tomkovic (DWR): model runs, training data
 - Ryan Ripken (RMA): RMA model runs, CalSim integration
-- Can Ruso (UC Berkeley): multi-scenario training, contrast loss, experiment driver
+- Can Ruso (UC Berkeley): multi-scenario training, transfer learning experiments and analysis, repository refactor
 
 MIT license, copyright 2024 Eli Ateljevich.
