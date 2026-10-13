@@ -63,7 +63,7 @@ steps:
 # --------------------------------------------------------------
 - name: x2_dsm2.schism  # Step 2: Transfer DSM2 Knowledge to SCHISM (3D Model)
   input_prefix: schism_base  # Points to SCHISM dataset (aligned with DSM2)
-  input_mask_regex: None  # No need for filtering
+  input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
   output_prefix: "{output_dir}/x2_dsm2.schism_base_gru2"  # New model output filename
   save_model_fname: "{output_dir}/x2_dsm2.schism_base_gru2"  # File to save the transfer-learned model
   load_model_fname: "{output_dir}/x2_dsm2_base_gru2"  # Start from DSM2 model
@@ -85,7 +85,7 @@ steps:
 # --------------------------------------------------------------
 - name: x2_base.suisun  # Step 3: Transfer SCHISM (Base Scenario) to SCHISM (Suisun Scenario)
   input_prefix: schism_suisun  # Dataset for the Suisun scenario
-  input_mask_regex: None
+  input_mask_regex: [schism_suisun_suisun-suisun\.csv, schism_suisun_3\.csv]
   output_prefix: "{output_dir}/x2_schism_base.suisun_gru2"  # New model name
   save_model_fname: "{output_dir}/x2_schism_base.suisun_gru2"  # Final model filename
   load_model_fname: "{output_dir}/x2_dsm2.schism_base_gru2"  # Start from SCHISM (Base)
@@ -98,7 +98,7 @@ steps:
   main_epochs: 36  # Extended training for scenario adaptation
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
+    source_input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
     transfer_type: contrastive  # Use contrastive learning to retain differences
     contrast_weight: 0.5 
     save_modified_orig_model_fname: x2_schism_base-suisun_gru2  # Keep modified version of SCHISM (Base)
@@ -121,7 +121,7 @@ steps:
   main_epochs: 36  # Extended training for scenario adaptation
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
+    source_input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
     transfer_type: contrastive  # Use contrastive learning to retain differences
     contrast_weight: 0.5
     save_modified_orig_model_fname: x2_schism_base-slr_gru2  # Keep modified version of SCHISM (Base)
@@ -130,8 +130,8 @@ steps:
 
 # --------------------------------------------------------------
 - name: x2_base.ft  # Step 3: Transfer SCHISM (Base Scenario) to SCHISM (Franks Scenario)
-  input_prefix: schism_franks  # Dataset for the Suisun scenario
-  input_mask_regex: None
+  input_prefix: schism_ft  # Dataset for the Suisun scenario
+  input_mask_regex: [schism_ft_3\.csv]
   output_prefix: "{output_dir}/x2_schism_base.ft_gru2"  # New model name
   save_model_fname: "{output_dir}/x2_schism_base.ft_gru2"  # Final model filename
   load_model_fname: "{output_dir}/x2_dsm2.schism_base_gru2"  # Start from SCHISM (Base)
@@ -144,7 +144,7 @@ steps:
   main_epochs: 36  # Extended training for scenario adaptation
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
+    source_input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
     transfer_type: contrastive  # Use contrastive learning to retain differences
     contrast_weight: 0.5
     save_modified_orig_model_fname: x2_schism_base-ft_gru2  # Keep modified version of SCHISM (Base)
@@ -154,7 +154,7 @@ steps:
 # --------------------------------------------------------------
 - name: x2_base.cache  # Step 3: Transfer SCHISM (Base Scenario) to SCHISM (Cache Scenario)
   input_prefix: schism_cache  # Dataset for the Suisun scenario
-  input_mask_regex: None
+  input_mask_regex: [schism_cache_3\.csv]
   output_prefix: "{output_dir}/x2_schism_base.cache_gru2"  # New model name
   save_model_fname: "{output_dir}/x2_schism_base.cache_gru2"  # Final model filename
   load_model_fname: "{output_dir}/x2_dsm2.schism_base_gru2"  # Start from SCHISM (Base)
@@ -167,7 +167,7 @@ steps:
   main_epochs: 36  # Extended training for scenario adaptation
   builder_args:
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv ]
+    source_input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
     transfer_type: contrastive  # Use contrastive learning to retain differences
     contrast_weight: 0.5
     save_modified_orig_model_fname: x2_schism_base-cache_gru2  # Keep modified version of SCHISM (Base)

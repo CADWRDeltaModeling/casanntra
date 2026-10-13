@@ -33,9 +33,12 @@ model_builder_config:
       bac: 1500.0
       rsl: 1500.0
       oh4: 1200.0
+      # wci: 1200.0
+      # trp: 1200.0
     ndays: 105
 
 steps:
+# --------------------------------------------------------------
 - name: dsm2_base
   input_prefix: dsm2_base
   input_mask_regex: [dsm2_base_historical\.csv, dsm2_base_calsim\.csv]
@@ -56,16 +59,17 @@ steps:
     ann_output_name: dsm2_base
 
     base_layers:
-      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
-      - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
+      - {type: GRU, units: 32, name: lay1, return_sequences: true,  trainable: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false,  trainable: true}
     branch_layers: []
 
     include_source_branch: false
     head_activation: elu
 
+# --------------------------------------------------------------
 - name: dsm2.schism
   input_prefix: schism_base
-  input_mask_regex: null
+  input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
   output_prefix: "{output_dir}/dsm2.schism_base_gru2"
   save_model_fname: "{output_dir}/dsm2.schism_base_gru2"
   load_model_fname: "{output_dir}/dsm2_base_gru2"
@@ -82,16 +86,17 @@ steps:
     transfer_type: direct
     ann_output_name: schism_base
     base_layers:
-      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
-      - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
+      - {type: GRU, units: 32, name: lay1, return_sequences: true,  trainable: true}
+      - {type: GRU, units: 16, name: lay2, return_sequences: false,  trainable: true}
     branch_layers: []
 
     include_source_branch: false
     head_activation: elu
 
+# --------------------------------------------------------------
 - name: base.multi
   input_prefix: schism_base
-  input_mask_regex: null
+  input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
   output_prefix: "{output_dir}/schism_base.multi_gru2"
   save_model_fname: "{output_dir}/schism_base.multi_gru2"
   load_model_fname: "{output_dir}/dsm2.schism_base_gru2"
@@ -105,10 +110,10 @@ steps:
   main_epochs: 35
 
   builder_args:
-    transfer_type: multi-direct
+    transfer_type: multi-direct           # V6: Base + scenarios, NO contrast heads
 
     trunk_layers:
-      - {type: GRU, units: 32, name: lay1, return_sequences: true, trainable: true}
+      - {type: GRU, units: 32, name: lay1, return_sequences: true,  trainable: true}
       - {type: GRU, units: 16, name: lay2, return_sequences: false, trainable: true}
     branch_layers: []
     include_source_branch: false
@@ -119,14 +124,18 @@ steps:
     contrast_weight: 0.5
 
     source_data_prefix: schism_base
-    source_input_mask_regex: [schism_base_2021.csv]
+    source_input_mask_regex: [schism_base_slr-base\.csv, schism_base_slr-slr\.csv, schism_base_suisun-base\.csv, schism_base_2021\.csv, schism_base_3\.csv]
 
     scenarios:
       - id: suisun
         input_prefix: schism_suisun
+        input_mask_regex: [schism_suisun_suisun-suisun\.csv, schism_suisun_3\.csv]
       - id: slr
         input_prefix: schism_slr_base
       - id: cache
         input_prefix: schism_cache
+        input_mask_regex: [schism_cache_3\.csv]
       - id: franks
         input_prefix: schism_ft
+        input_mask_regex: [schism_ft_3\.csv]
+
